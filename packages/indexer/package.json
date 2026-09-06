@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "node --test tests/indexer.test.js",
+    "test": "node --test tests/indexer.test.js tests/reorg.test.js",
     "start": "node dist/index.js"
   },
   "dependencies": {

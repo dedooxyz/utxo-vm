@@ -23,14 +23,14 @@ async function continuousSync() {
   if (isSyncing) return;
   isSyncing = true;
   try {
-    const lastSync = await db.getLastSyncBlock("JKC");
+    const lastSync = await db.getLastSyncBlock(CHAIN);
     const startBlock = lastSync > 0 ? lastSync + 1 : undefined;
     const result = await scanner.syncFromElectrs(startBlock);
     if (result.indexed > 0) {
       console.log(`[Indexer] Synced ${result.indexed} envelopes from ${result.blocks} blocks (height: ${scanner.currentBlockHeight})`);
     }
     lastSyncedBlock = scanner.currentBlockHeight;
-    await db.setLastSyncBlock("JKC", scanner.currentBlockHeight);
+    await db.setLastSyncBlock(CHAIN, scanner.currentBlockHeight);
 
     // Also scan mempool every cycle
     const mempoolResult = await scanner.scanMempool();
@@ -179,7 +179,7 @@ app.post("/api/v1/sync", async (req, res) => {
   const { sinceBlock } = req.body;
   try {
     const result = await scanner.syncFromElectrs(sinceBlock);
-    await db.setLastSyncBlock("JKC", scanner.currentBlockHeight);
+    await db.setLastSyncBlock(CHAIN, scanner.currentBlockHeight);
     res.json({ success: true, ...result });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -188,7 +188,7 @@ app.post("/api/v1/sync", async (req, res) => {
 
 // 10. Sync status
 app.get("/api/v1/sync/status", async (_req, res) => {
-  const lastSync = await db.getLastSyncBlock("JKC");
+  const lastSync = await db.getLastSyncBlock(CHAIN);
   res.json({
     isSyncing,
     lastSyncedBlock,
@@ -226,6 +226,37 @@ app.post("/api/v1/parse-envelope", async (req, res) => {
     } catch {}
   }
   res.json({ ...envelope, payload });
+});
+
+
+// 13. State Root endpoints
+app.get("/api/v1/state-root", async (_req, res) => {
+  const height = scanner.currentBlockHeight;
+  const stateRoot = await db.getStateRoot(CHAIN, height);
+  res.json({
+    chain: CHAIN,
+    blockHeight: height,
+    stateRoot: stateRoot || null,
+  });
+});
+
+app.get("/api/v1/state-root/:height", async (req, res) => {
+  const height = parseInt(req.params.height, 10);
+  const stateRoot = await db.getStateRoot(CHAIN, height);
+  if (!stateRoot) {
+    return res.status(404).json({ error: `State root not found for height ${height}` });
+  }
+  res.json({
+    chain: CHAIN,
+    blockHeight: height,
+    stateRoot,
+  });
+});
+
+// 14. Unconfirmed mempool transitions
+app.get("/api/v1/mempool/transitions", async (_req, res) => {
+  const transitions = db.getMempoolTransitions ? await db.getMempoolTransitions(CHAIN) : [];
+  res.json(transitions);
 });
 
 const PORT = process.env.PORT || 9773;

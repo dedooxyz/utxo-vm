@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Language: Rust / AssemblyScript](https://img.shields.io/badge/Language-Rust%20%7C%20AssemblyScript-orange.svg)](https://www.rust-lang.org/)
-[![Multi-Chain](https://img.shields.io/badge/Chains-BTC%20%7C%20LTC%20%7C%20DOGE%20%7C%20JKC%20%7C%20BEL-blue.svg)](https://github.com/DedooProjects/utxo-vm)
+[![Multi-Chain](https://img.shields.io/badge/Chains-BTC%20%7C%20LTC%20%7C%20DOGE%20%7C%20JKC%20%7C%20BEL-blue.svg)](https://github.com/dedooxyz/utxo-vm)
 
 ---
 
@@ -43,7 +43,7 @@ Instead of treating transactions as passive text inscriptions (like BRC-20) or u
 
 ```bash
 # Clone & install dependencies
-git clone https://github.com/DedooProjects/utxo-vm.git
+git clone https://github.com/dedooxyz/utxo-vm.git
 cd utxo-vm
 pnpm install
 

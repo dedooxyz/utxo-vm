@@ -1,6 +1,6 @@
 import { execSync } from "child_process";
 import path from "path";
-import { MemoryStateDB, SmartObjectRecord, StateTransitionRecord } from "./state_db";
+import { MemoryStateDB, SmartObjectRecord, StateTransitionRecord, IStateDB } from "./state_db";
 import { getChainConfig, isOpcodesSupported, isSettlementLayer, getSupportedChildChains } from "./chains";
 
 const VM_BINARY = path.join(__dirname, "../../../target/release/utxo-core-vm-cli");
@@ -60,7 +60,7 @@ export function detectOpcode(scriptPubKeyHex: string): OpcodeResult | null {
 export async function processOpcode(
   opcodeResult: OpcodeResult,
   tx: any,
-  db: MemoryStateDB,
+  db: IStateDB,
   chain: string,
   blockHeight: number
 ): Promise<boolean> {
@@ -91,7 +91,7 @@ export async function processOpcode(
 async function processCreateSmartObject(
   opcodeResult: OpcodeResult,
   tx: any,
-  db: MemoryStateDB,
+  db: IStateDB,
   chain: string,
   blockHeight: number
 ): Promise<boolean> {
@@ -111,7 +111,7 @@ async function processCreateSmartObject(
       updatedAtBlock: blockHeight,
     };
 
-    await db.saveObject(record);
+    await db.saveObject(record, chain);
     console.log(`[Scanner] Opcode: Created Smart Object ${objectId} at Seal ${seal}`);
     return true;
   } catch (err: any) {
@@ -123,7 +123,7 @@ async function processCreateSmartObject(
 async function processCallSmartObject(
   opcodeResult: OpcodeResult,
   tx: any,
-  db: MemoryStateDB,
+  db: IStateDB,
   chain: string,
   blockHeight: number
 ): Promise<boolean> {
@@ -150,7 +150,7 @@ async function processCallSmartObject(
       updatedAtBlock: blockHeight,
     };
 
-    await db.saveObject(record);
+    await db.saveObject(record, chain);
     console.log(`[Scanner] Opcode: Called Smart Object ${existingObj.objectId} (${method})`);
     return true;
   } catch (err: any) {
@@ -162,7 +162,7 @@ async function processCallSmartObject(
 async function processUpdateState(
   opcodeResult: OpcodeResult,
   tx: any,
-  db: MemoryStateDB,
+  db: IStateDB,
   chain: string,
   blockHeight: number
 ): Promise<boolean> {
@@ -189,7 +189,7 @@ async function processUpdateState(
       updatedAtBlock: blockHeight,
     };
 
-    await db.saveObject(record);
+    await db.saveObject(record, chain);
     console.log(`[Scanner] Opcode: Updated state for ${existingObj.objectId}`);
     return true;
   } catch (err: any) {
@@ -201,7 +201,7 @@ async function processUpdateState(
 async function processSettleCrossChain(
   opcodeResult: OpcodeResult,
   tx: any,
-  db: MemoryStateDB,
+  db: IStateDB,
   chain: string,
   blockHeight: number
 ): Promise<boolean> {
@@ -234,7 +234,7 @@ async function processSettleCrossChain(
       updatedAtBlock: blockHeight,
     };
 
-    await db.saveObject(record);
+    await db.saveObject(record, chain);
     console.log(`[Scanner] Settlement ${settlementId} recorded`);
     return true;
   } catch (err: any) {
@@ -246,7 +246,7 @@ async function processSettleCrossChain(
 async function processVerifySeal(
   opcodeResult: OpcodeResult,
   tx: any,
-  db: MemoryStateDB,
+  db: IStateDB,
   chain: string,
   blockHeight: number
 ): Promise<boolean> {
@@ -423,14 +423,14 @@ export class ElectrsClient {
 
 // --- Scanner with Electrs ---
 export class ChainBlockScanner {
-  private db: MemoryStateDB;
+  private db: IStateDB;
   public chain: string;
   public currentBlockHeight: number = 0;
   private isRunning: boolean = false;
   private electrs: ElectrsClient;
   private mempoolSeen: Set<string> = new Set();
 
-  constructor(db: MemoryStateDB, chain: string = "BTC", electrsUrl?: string) {
+  constructor(db: IStateDB, chain: string = "BTC", electrsUrl?: string) {
     this.db = db;
     this.chain = chain;
     this.electrs = new ElectrsClient(electrsUrl || "https://jkc-testnet-api.s3na.xyz");
@@ -451,18 +451,53 @@ export class ChainBlockScanner {
    */
   async syncFromElectrs(sinceBlock?: number): Promise<{ indexed: number; blocks: number; opcodes: number }> {
     const tipHeight = await this.electrs.tipHeight();
-    const startBlock = sinceBlock || Math.max(this.currentBlockHeight, tipHeight - 10);
+    let startBlock = sinceBlock || (this.currentBlockHeight > 0 ? this.currentBlockHeight + 1 : Math.max(0, tipHeight - 10));
     let indexed = 0;
     let opcodes = 0;
+
+    // Check for chain reorg at current tip
+    if (this.currentBlockHeight > 0) {
+      const storedTipHash = await this.db.getBlockHash(this.chain, this.currentBlockHeight);
+      let canonTipHash: string | null = null;
+      try {
+        canonTipHash = await this.electrs.blockHash(this.currentBlockHeight);
+      } catch {}
+
+      if (storedTipHash && canonTipHash && storedTipHash !== canonTipHash) {
+        console.warn(`[Scanner] Reorg detected at height ${this.currentBlockHeight}! Stored: ${storedTipHash}, Canon: ${canonTipHash}`);
+        let ancestorHeight = this.currentBlockHeight - 1;
+        let depth = 1;
+        while (ancestorHeight > 0 && depth < 100) {
+          const storedH = await this.db.getBlockHash(this.chain, ancestorHeight);
+          let canonH: string | null = null;
+          try {
+            canonH = await this.electrs.blockHash(ancestorHeight);
+          } catch {}
+          if (storedH && canonH && storedH === canonH) {
+            break;
+          }
+          ancestorHeight--;
+          depth++;
+        }
+        console.warn(`[Scanner] Rolling back to common ancestor at height ${ancestorHeight}...`);
+        await this.db.rollbackToBlock(this.chain, ancestorHeight);
+        this.currentBlockHeight = ancestorHeight;
+        startBlock = ancestorHeight + 1;
+      }
+    }
 
     console.log(`[Scanner] Syncing blocks ${startBlock} → ${tipHeight}`);
 
     for (let height = startBlock; height <= tipHeight; height++) {
       const blockHash = await this.electrs.blockHash(height);
+      await this.db.recordBlockHeader(this.chain, height, blockHash);
       const txs = await this.electrs.blockTxs(blockHash);
 
       for (const tx of txs) {
         this.mempoolSeen.delete(tx.txid);
+        if (this.db.removeMempoolTransition) {
+          await this.db.removeMempoolTransition(tx.txid);
+        }
 
         // Check for opcodes first (for chains that support them)
         const opcodeResult = detectOpcode(tx.vout?.[0]?.scriptpubkey || "");
@@ -513,6 +548,7 @@ export class ChainBlockScanner {
         }
       }
 
+      await this.db.computeAndSaveStateRoot(this.chain, height);
       this.currentBlockHeight = height;
     }
 
@@ -595,11 +631,18 @@ export class ChainBlockScanner {
   /**
    * Process a confirmed block containing transactions
    */
-  async processBlock(blockHeight: number, txs: BlockTransaction[]): Promise<void> {
+  async processBlock(blockHeight: number, txs: BlockTransaction[], blockHash?: string): Promise<void> {
     this.currentBlockHeight = blockHeight;
+    if (blockHash) {
+      await this.db.recordBlockHeader(this.chain, blockHeight, blockHash);
+    }
     for (const tx of txs) {
+      if (this.db.removeMempoolTransition) {
+        await this.db.removeMempoolTransition(tx.txid);
+      }
       await this.processTransaction(tx, blockHeight);
     }
+    await this.db.computeAndSaveStateRoot(this.chain, blockHeight);
   }
 
   /**
@@ -654,7 +697,7 @@ export class ChainBlockScanner {
         updatedAtBlock: blockHeight,
       };
 
-      await this.db.saveObject(record);
+      await this.db.saveObject(record, this.chain);
       console.log(`[Scanner] Deployed Smart Object ${objectId} at Seal ${seal} (VM: ${vmResult.success ? "ok" : "fallback"})`);
     }
 
@@ -671,7 +714,7 @@ export class ChainBlockScanner {
         stateData: { type: "raw_inscription", payloadLen: tx.envelope.payload.length },
         updatedAtBlock: blockHeight,
       };
-      await this.db.saveObject(record);
+      await this.db.saveObject(record, this.chain);
       console.log(`[Scanner] Raw Inscription ${objectId} at Seal ${seal}`);
     }
 
@@ -736,7 +779,7 @@ export class ChainBlockScanner {
         updatedAtBlock: blockHeight,
       };
 
-      await this.db.saveObject(updatedRecord);
+      await this.db.saveObject(updatedRecord, this.chain);
 
       const transition: StateTransitionRecord = {
         txid: tx.txid,
@@ -767,7 +810,7 @@ export class ChainBlockScanner {
         stateData: metadata || {},
         updatedAtBlock: blockHeight,
       };
-      await this.db.saveObject(record);
+      await this.db.saveObject(record, this.chain);
       console.log(`[Scanner] Call ${objectId} at Seal ${seal}`);
     }
   }
