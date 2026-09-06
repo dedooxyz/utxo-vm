@@ -1,0 +1,261 @@
+{
+  "chains": {
+    "JKC_TESTNET": {
+      "name": "Junkcoin Testnet",
+      "ticker": "tJKC",
+      "electrsUrl": "https://jkc-testnet-api.s3na.xyz",
+      "network": {
+        "p2pkhPrefix": "0x6f",
+        "p2shPrefix": "0xc4",
+        "wifPrefix": "0xef",
+        "bech32Prefix": "tjkc"
+      },
+      "opcodesSupported": true,
+      "opcodes": {
+        "OP_CREATE_SMART_OBJECT": 192,
+        "OP_CALL_SMART_OBJECT": 193,
+        "OP_UPDATE_STATE": 194,
+        "OP_SETTLE_CROSS_CHAIN": 195,
+        "OP_VERIFY_SEAL": 196
+      },
+      "settlement": {
+        "enabled": true,
+        "role": "settlement_layer",
+        "supportedChains": ["BTC", "LTC", "DOGE", "BEL", "DINGO", "LKY", "SHIC", "TRMP", "B1T", "CRC", "PEP"]
+      },
+      "env": "testnet"
+    },
+    "JKC": {
+      "name": "Junkcoin",
+      "ticker": "JKC",
+      "electrsUrl": "https://junk-api.s3na.xyz",
+      "network": {
+        "p2pkhPrefix": "0x10",
+        "p2shPrefix": "0x05",
+        "wifPrefix": "0x90",
+        "bech32Prefix": "jkc"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "settlement_layer",
+        "supportedChains": []
+      },
+      "env": "mainnet"
+    },
+    "BTC": {
+      "name": "Bitcoin",
+      "ticker": "BTC",
+      "electrsUrl": "https://blockstream.info/api",
+      "network": {
+        "p2pkhPrefix": "0x00",
+        "p2shPrefix": "0x05",
+        "wifPrefix": "0x80",
+        "bech32Prefix": "bc"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "LTC": {
+      "name": "Litecoin",
+      "ticker": "LTC",
+      "electrsUrl": "https://litecoinspace.io/api",
+      "network": {
+        "p2pkhPrefix": "0x30",
+        "p2shPrefix": "0x32",
+        "wifPrefix": "0xb0",
+        "bech32Prefix": "ltc"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "DOGE": {
+      "name": "Dogecoin",
+      "ticker": "DOGE",
+      "electrsUrl": "https://dogechain.info/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "dc"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "BEL": {
+      "name": "Bells",
+      "ticker": "BEL",
+      "electrsUrl": "https://bellschain.io/api",
+      "network": {
+        "p2pkhPrefix": "0x19",
+        "p2shPrefix": "0x1e",
+        "wifPrefix": "0x99",
+        "bech32Prefix": "bel"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "DINGO": {
+      "name": "Dingocoin",
+      "ticker": "DINGO",
+      "electrsUrl": "https://dingo.network/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "dingo"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "LKY": {
+      "name": "Luckycoin",
+      "ticker": "LKY",
+      "electrsUrl": "https://luckycoin.network/api",
+      "network": {
+        "p2pkhPrefix": "0x25",
+        "p2shPrefix": "0x05",
+        "wifPrefix": "0xa5",
+        "bech32Prefix": "lky"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "SHIC": {
+      "name": "Shiba Inu Coin",
+      "ticker": "SHIC",
+      "electrsUrl": "https://shibacoin.network/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "shic"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "TRMP": {
+      "name": "Trumpcoin",
+      "ticker": "TRMP",
+      "electrsUrl": "https://trumpcoin.network/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "trmp"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "B1T": {
+      "name": "Bean Cash",
+      "ticker": "B1T",
+      "electrsUrl": "https://beancash.network/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "b1t"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "CRC": {
+      "name": "Crocodile Cash",
+      "ticker": "CRC",
+      "electrsUrl": "https://crocodilecash.network/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "crc"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    },
+    "PEP": {
+      "name": "Pepecoin",
+      "ticker": "PEP",
+      "electrsUrl": "https://pepecoin.network/api",
+      "network": {
+        "p2pkhPrefix": "0x1e",
+        "p2shPrefix": "0x16",
+        "wifPrefix": "0x9e",
+        "bech32Prefix": "pep"
+      },
+      "opcodesSupported": false,
+      "opcodes": {},
+      "settlement": {
+        "enabled": false,
+        "role": "child_chain",
+        "settlementChain": "JKC"
+      },
+      "env": "mainnet"
+    }
+  },
+  "defaults": {
+    "chain": "JKC_TESTNET",
+    "electrsUrl": "https://jkc-testnet-api.s3na.xyz"
+  }
+}

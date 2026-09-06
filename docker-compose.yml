@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  # Testnet indexer (default)
+  indexer:
+    build: .
+    container_name: utxo-vm-indexer
+    restart: unless-stopped
+    ports:
+      - "9773:9773"
+    environment:
+      - CHAIN=${CHAIN:-JKC_TESTNET}
+      - CHAIN_CONFIG_PATH=/app/chain.json
+      - DB_PATH=/app/data/indexer.db
+      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-30000}
+      - PORT=9773
+    volumes:
+      - indexer-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9773/api/v1/chain/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Mainnet indexer (when opcodes supported)
+  indexer-mainnet:
+    build: .
+    container_name: utxo-vm-indexer-mainnet
+    restart: unless-stopped
+    profiles:
+      - mainnet
+    ports:
+      - "9774:9773"
+    environment:
+      - CHAIN=${CHAIN:-JKC}
+      - CHAIN_CONFIG_PATH=/app/chain.json
+      - DB_PATH=/app/data/indexer-mainnet.db
+      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-30000}
+      - PORT=9773
+    volumes:
+      - indexer-mainnet-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9773/api/v1/chain/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  indexer-data:
+  indexer-mainnet-data:

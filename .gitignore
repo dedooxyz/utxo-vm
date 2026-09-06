@@ -1,0 +1,28 @@
+node_modules/
+dist/
+build/
+target/
+*.wasm
+.DS_Store
+*.log
+.env
+.env.local
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+data/*.db
+data/*.db-shm
+data/*.db-wal
+**/data/*.db
+**/data/*.db-shm
+**/data/*.db-wal
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz

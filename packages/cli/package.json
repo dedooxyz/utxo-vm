@@ -1,0 +1,19 @@
+{
+  "name": "@utxo-vm/cli",
+  "version": "0.1.0",
+  "description": "Developer CLI tool for UTXO-VM",
+  "bin": {
+    "utxo-vm": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@utxo-vm/sdk": "*",
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.20",
+    "typescript": "^5.3.3"
+  }
+}

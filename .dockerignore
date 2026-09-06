@@ -1,0 +1,11 @@
+node_modules
+dist
+target
+*.log
+.env
+.env.local
+data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

@@ -1,0 +1,605 @@
+================================================================================
+                    JUNKCOIN CROSS-CHAIN SETTLEMENT LAYER
+                              Technical Documentation
+================================================================================
+
+Author: UTXO-VM Development Team
+Date: September 2026
+Version: 0.1.0 (Testnet)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. Executive Summary
+2. Problem Statement
+3. Solution Architecture
+4. Technical Components
+5. Cross-Chain Protocol
+6. Verification Mechanism
+7. Security Model
+8. Economic Model
+9. Implementation Status
+10. Test Results
+11. Roadmap
+12. Appendix: Code Examples
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+Junkcoin (JKC) is an AuxPow (Auxiliary Proof-of-Work) cryptocurrency that
+merged mines with Bitcoin. This document describes a novel architecture where
+Junkcoin serves as a settlement layer for all UTXO-based AuxPow chains.
+
+Key innovations:
+- UTXO-VM: Deterministic WebAssembly execution on UTXO chains
+- Single-Use Seals: Cryptographic state transitions
+- Cross-Chain Anchoring: State commitment via OP_RETURN envelopes
+- Privacy: Stealth settlement for confidential transfers
+
+================================================================================
+2. PROBLEM STATEMENT
+================================================================================
+
+2.1 Current AuxPow Landscape
+--------------------------------------------------------------------------------
+
+AuxPow chains (Junkcoin, Dogecoin, Litecoin forks) merged mine with
+Bitcoin/Litecoin for security. However, they lack:
+
+- State transition layer: No smart contracts or state management
+- Cross-chain communication: No standard protocol for inter-chain transfers
+- Settlement finality: No cryptographic proof of state across chains
+
+2.2 Limitations of Existing Solutions
+--------------------------------------------------------------------------------
+
+| Solution          | Limitation                                    |
+|-------------------|-----------------------------------------------|
+| Bitcoin Sidechains | Requires federated peg, not trustless        |
+| Atomic Swaps       | Limited to asset transfers, no state         |
+| Bridge Contracts   | Centralized, single point of failure         |
+
+2.3 The Junkcoin Opportunity
+--------------------------------------------------------------------------------
+
+Junkcoin has:
+- Bitcoin-grade security via AuxPow
+- Low transaction fees
+- Active development community
+- Existing infrastructure (exchanges, wallets)
+
+================================================================================
+3. SOLUTION ARCHITECTURE
+================================================================================
+
+3.1 High-Level Architecture
+--------------------------------------------------------------------------------
+
+                    ┌─────────────────────────────────────┐
+                    │         BITCOIN (PoW)               │
+                    │    Merged Mining (AuxPow)           │
+                    └──────────────┬──────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────────────┐
+                    │      JUNKCOIN (Settlement Layer)    │
+                    │  ┌────────────────────────────────┐ │
+                    │  │ UTXO-VM Runtime                 │ │
+                    │  │ - Seal Chaining                 │ │
+                    │  │ - State Transitions             │ │
+                    │  │ - Cross-Chain Verification      │ │
+                    │  └────────────────────────────────┘ │
+                    │  ┌────────────────────────────────┐ │
+                    │  │ State Anchors                   │ │
+                    │  │ - Chain A: merkle_root          │ │
+                    │  │ - Chain B: merkle_root          │ │
+                    │  │ - Chain C: merkle_root          │ │
+                    │  └────────────────────────────────┘ │
+                    └──────────────┬──────────────────────┘
+                                   │
+          ┌────────────────────────┼────────────────────────┐
+          │                        │                        │
+   ┌──────▼──────┐          ┌──────▼──────┐          ┌──────▼──────┐
+   │  Chain A    │          │  Chain B    │          │  Chain C    │
+   │  (testnet)  │          │  (dogecoin) │          │  (ltc fork) │
+   └─────────────┘          └─────────────┘          └─────────────┘
+
+3.2 Core Components
+--------------------------------------------------------------------------------
+
+A. UTXO-VM Runtime
+   - WebAssembly execution engine (Wasmtime)
+   - Deterministic execution with gas metering
+   - Host functions for state management
+
+B. Single-Use Seals
+   - UTXO-based state bindings
+   - Cryptographic state transitions
+   - One-time use enforcement
+
+C. Envelope Protocol
+   - OP_RETURN data encoding
+   - Standardized payload format
+   - Backwards compatible
+
+D. Cross-Chain Verification
+   - Merkle proof verification
+   - Seal existence proof
+   - State commitment anchoring
+
+================================================================================
+4. TECHNICAL COMPONENTS
+================================================================================
+
+4.1 UTXO-VM Runtime
+--------------------------------------------------------------------------------
+
+The UTXO-VM runtime executes WebAssembly contracts deterministically:
+
+- Engine: Wasmtime 18.0.2
+- Gas Model: Fuel-based metering
+- Memory: Bounded (32 pages max)
+- State: Seal-based, not account-based
+
+Host Functions:
+  host_get_caller()     → Get transaction signer
+  host_get_satoshis()   → Get locked amount
+  host_get_seal()       → Get current UTXO seal
+  host_emit_event()     → Emit indexable event
+  host_create_object()  → Spawn child object
+  host_stealth_settle() → Privacy settlement
+
+4.2 Single-Use Seals
+--------------------------------------------------------------------------------
+
+A seal is a reference to a specific UTXO:
+
+  Seal = txid:vout
+
+Properties:
+- Unique: Each UTXO can only be spent once
+- Cryptographic: Bound to transaction signature
+- Verifiable: Anyone can verify UTXO existence
+
+State Transition:
+  S_t → S_{t+1}
+
+  1. Consume input seal (spend UTXO)
+  2. Execute contract logic
+  3. Create output seal (new UTXO)
+  4. Update state data
+
+4.3 Envelope Protocol
+--------------------------------------------------------------------------------
+
+Format:
+  OP_FALSE OP_IF
+    OP_PUSH "utxovm"           // Protocol identifier
+    OP_PUSH 0x01               // Version
+    OP_PUSH <content_type>     // MIME type
+    OP_PUSH <payload>          // Data
+  OP_ENDIF
+
+Content Types:
+  application/wasm    → Contract deployment
+  application/json    → Method calls, state updates
+
+4.4 Cross-Chain Envelope
+--------------------------------------------------------------------------------
+
+State Anchor (Child Chain → Junkcoin):
+  {
+    "type": "state_anchor",
+    "chainId": "chain_a_testnet",
+    "merkleRoot": "0xabc123...",
+    "blockHeight": 12345,
+    "blockHash": "0xdef456...",
+    "stateRoot": "0x789abc...",
+    "prevSeal": "txid:vout"
+  }
+
+State Claim (Junkcoin → Child Chain):
+  {
+    "type": "state_claim",
+    "chainId": "chain_a_testnet",
+    "junkcoinSeal": "txid:vout",
+    "merkleRoot": "0xabc123...",
+    "proof": ["0x...", "0x..."],
+    "signatures": ["0x..."]
+  }
+
+================================================================================
+5. CROSS-CHAIN PROTOCOL
+================================================================================
+
+5.1 State Anchoring Flow
+--------------------------------------------------------------------------------
+
+Step 1: Child Chain A computes state root
+  - Collect all transactions in block
+  - Build Merkle tree
+  - Compute state root hash
+
+Step 2: A broadcasts anchor to Junkcoin
+  - Create OP_RETURN with state_anchor payload
+  - Include merkleRoot, blockHeight, blockHash
+  - Reference previous seal (chain continuity)
+
+Step 3: Junkcoin indexer stores anchor
+  - Parse envelope
+  - Create smart object with seal
+  - Store state data
+
+Step 4: A receives seal confirmation
+  - Seal = txid:vout from Junkcoin
+  - Can now reference this seal in future operations
+
+5.2 State Claim Verification
+--------------------------------------------------------------------------------
+
+Child Chain B receives state claim from A:
+
+Step 1: B queries Junkcoin for seal
+  - GET /api/v1/object/{seal}
+  - Verify seal exists and is unspent
+
+Step 2: B verifies merkle proof
+  - Reconstruct merkle root from proof
+  - Compare with stored merkleRoot
+
+Step 3: B accepts state
+  - Update local state
+  - Create confirmation transaction
+
+5.3 Cross-Chain Transfer Flow
+--------------------------------------------------------------------------------
+
+Alice (Chain A) wants to send tokens to Bob (Chain B):
+
+Step 1: Alice locks tokens on Chain A
+  - Create seal on Chain A
+  - Include transfer details in state
+
+Step 2: Relayer broadcasts to Junkcoin
+  - Create cross_chain_transfer envelope
+  - Include source seal, destination info
+
+Step 3: Bob claims on Chain B
+  - Provide proof of Junkcoin seal
+  - Bob's address receives tokens
+
+Step 4: Settlement complete
+  - Chain A seal consumed
+  - Chain B seal created
+  - Junkcoin has audit trail
+
+================================================================================
+6. VERIFICATION MECHANISM
+================================================================================
+
+6.1 Seal Verification
+--------------------------------------------------------------------------------
+
+To verify a seal exists on Junkcoin:
+
+  GET /api/v1/object/{objectId}
+
+Response:
+  {
+    "objectId": "obj_abc123",
+    "seal": "txid:vout",
+    "stateData": { ... },
+    "owner": "0x..."
+  }
+
+Verification:
+  1. Check seal matches expected txid:vout
+  2. Verify stateData contains expected merkleRoot
+  3. Confirm seal is unspent (latest state)
+
+6.2 Merkle Proof Verification
+--------------------------------------------------------------------------------
+
+Given:
+  - Leaf hash (transaction hash)
+  - Proof path (sibling hashes)
+  - Root hash (stored on Junkcoin)
+
+Verification:
+  1. Start with leaf hash
+  2. For each proof element:
+     - Concatenate with current hash
+     - Compute SHA256
+  3. Compare final hash with root
+
+6.3 State Consistency Check
+--------------------------------------------------------------------------------
+
+To ensure cross-chain consistency:
+
+  1. Junkcoin stores state anchors from multiple chains
+  2. Each anchor includes block height and hash
+  3. Chains can verify:
+     - Their anchor exists on Junkcoin
+     - No conflicting anchors for same block
+     - Anchor chain is unbroken
+
+================================================================================
+7. SECURITY MODEL
+================================================================================
+
+7.1 Threat Model
+--------------------------------------------------------------------------------
+
+Attacker capabilities:
+  - Can create transactions on any chain
+  - Can broadcast to multiple chains simultaneously
+  - Cannot break cryptographic primitives
+
+Defenses:
+  - Seals are UTXOs (double-spend prevention)
+  - Merkle proofs are deterministic
+  - Signatures are cryptographic
+
+7.2 Trust Assumptions
+--------------------------------------------------------------------------------
+
+- Junkcoin miners are honest majority
+- At least one honest relayer exists
+- Cryptographic primitives are secure
+
+7.3 Finality
+--------------------------------------------------------------------------------
+
+Probabilistic finality:
+  - 1 confirmation: ~99% final
+  - 6 confirmations: ~99.99% final
+  - 60 confirmations: ~99.999999% final
+
+Child chains should wait for N confirmations before accepting state.
+
+================================================================================
+8. ECONOMIC MODEL
+================================================================================
+
+8.1 Fee Structure
+--------------------------------------------------------------------------------
+
+Operation                 Fee (sats)    Notes
+─────────────────────────────────────────────────────
+State Anchor              1000          Data storage
+State Claim               500           Verification
+Cross-Chain Transfer      2000          Combined
+Contract Deployment       5000          WASM storage
+Method Call               100           State update
+
+8.2 Incentives
+--------------------------------------------------------------------------------
+
+Relayers:
+  - Earn fees for propagating state
+  - Stake required for spam prevention
+
+Validators:
+  - Earn fees for signing claims
+  - Slashing for malicious behavior
+
+Miners:
+  - Earn standard mining fees
+  - Bonus for including state anchors
+
+8.3 Token Economics
+--------------------------------------------------------------------------------
+
+JKC token utility:
+  - Transaction fees
+  - Staking for relayers/validators
+  - Gas for UTXO-VM execution
+
+================================================================================
+9. IMPLEMENTATION STATUS
+================================================================================
+
+Phase 1: State Anchoring ✅ COMPLETE
+  - Envelope protocol implemented
+  - Core-VM WASM execution working
+  - Indexer with electrs integration
+  - Seal chaining verified
+
+Phase 2: Seal Verification 🔄 IN PROGRESS
+  - Cross-chain verification module
+  - Merkle proof verification
+  - API endpoints for verification
+
+Phase 3: Cross-Chain Transfer ⏳ PLANNED
+  - Atomic swaps via seals
+  - Bridge contracts
+  - Relayer network
+
+Phase 4: Full Settlement ⏳ PLANNED
+  - Multi-chain state sync
+  - Governance framework
+  - Production deployment
+
+================================================================================
+10. TEST RESULTS
+================================================================================
+
+10.1 Envelope Protocol Tests
+--------------------------------------------------------------------------------
+
+Test                          Status    Block
+────────────────────────────────────────────────
+Deploy WASM                   ✅        164330
+Transfer Call                 ✅        164332
+Stealth Settlement            ✅        164333
+State Transition              ✅        164334
+Batch Deploy (2 envelopes)    ✅        164335
+Tiny Payload (1 byte)         ✅        164336
+Medium Payload (100 bytes)    ✅        164338
+Large Payload (400 bytes)     ✅        164339
+3-Hop Chain                   ✅        164340-164342
+
+Total: 9/9 passed
+
+10.2 Token Contract Tests
+--------------------------------------------------------------------------------
+
+Test                          Status    Block
+────────────────────────────────────────────────
+Deploy Token Contract         ✅        164415
+Mint 100K JKCT                ✅        164419
+Transfer 25K JKCT             ✅        164420
+Burn 10K JKCT                 ✅        164423
+Stealth Settlement            ✅        164424
+3-Hop Ownership Chain         ✅        164427-164430
+
+Total: 6/6 passed
+
+10.3 Core-VM Integration Tests
+--------------------------------------------------------------------------------
+
+Test                          Status    Block
+────────────────────────────────────────────────
+Code Hash Calculation         ✅        N/A
+Direct Deploy (WASM)          ✅        N/A
+On-Chain Deploy               ✅        164415
+Mint Execution                ✅        164419
+Transfer Execution            ✅        164420
+Burn Execution                ✅        164423
+Stealth Settlement            ✅        164424
+3-Hop Chain                   ✅        164427-164430
+
+Total: 8/8 passed
+
+10.4 Network Statistics
+--------------------------------------------------------------------------------
+
+Metric                        Value
+────────────────────────────────────────────────
+Tip Height                    164430
+Indexed Objects                19
+State Transitions             28
+Core-VM Gas Used              0 (deterministic)
+Contract Address              obj_407a5e8a600a951b
+
+================================================================================
+11. ROADMAP
+================================================================================
+
+Q3 2026:
+  - ✅ Core-VM WASM execution
+  - ✅ Envelope protocol
+  - ✅ Indexer with electrs
+  - ✅ Seal chaining
+
+Q4 2026:
+  - 🔄 Cross-chain verification module
+  - 🔄 Merkle proof verification
+  - 🔄 Persistent storage (SQLite)
+  - 🔄 Mempool support
+
+Q1 2027:
+  - ⏳ Atomic swaps via seals
+  - ⏳ Bridge contracts
+  - ⏳ Relayer network
+  - ⏳ Testnet deployment
+
+Q2 2027:
+  - ⏳ Mainnet launch
+  - ⏳ Multi-chain integration
+  - ⏳ Governance framework
+  - ⏳ Production hardening
+
+================================================================================
+12. APPENDIX: CODE EXAMPLES
+================================================================================
+
+12.1 Creating a State Anchor
+--------------------------------------------------------------------------------
+
+```javascript
+const anchor = {
+  type: "state_anchor",
+  chainId: "chain_a_testnet",
+  merkleRoot: "0x" + merkleRoot.toString("hex"),
+  blockHeight: 12345,
+  blockHash: "0x" + blockHash.toString("hex"),
+  stateRoot: "0x" + stateRoot.toString("hex"),
+  prevSeal: "prev_txid:0"
+};
+
+const envelope = buildEnvelope("utxovm", 1, "application/json", 
+  Buffer.from(JSON.stringify(anchor)));
+
+// Broadcast to Junkcoin
+```
+
+12.2 Verifying a Seal
+--------------------------------------------------------------------------------
+
+```javascript
+// Query Junkcoin indexer
+const response = await fetch(
+  `http://localhost:9773/api/v1/object/${objectId}`
+);
+const object = await response.json();
+
+// Verify seal
+if (object.seal === expectedSeal) {
+  console.log("Seal verified!");
+}
+```
+
+12.3 Merkle Proof Verification
+--------------------------------------------------------------------------------
+
+```javascript
+function verifyMerkleProof(leaf, proof, root) {
+  let current = leaf;
+  
+  for (const sibling of proof) {
+    const combined = Buffer.concat([current, sibling]);
+    current = sha256(combined);
+  }
+  
+  return current.equals(root);
+}
+```
+
+12.4 Cross-Chain Transfer
+--------------------------------------------------------------------------------
+
+```javascript
+// Step 1: Lock tokens on source chain
+const lockTx = await sourceChain.lock({
+  amount: 10000,
+  receiver: bobAddress,
+  destChain: "chain_b"
+});
+
+// Step 2: Create anchor on Junkcoin
+const anchor = await junkcoin.anchor({
+  sourceChain: "chain_a",
+  lockTxid: lockTx.txid,
+  receiver: bobAddress
+});
+
+// Step 3: Claim on destination chain
+const claimTx = await destinationChain.claim({
+  anchorSeal: anchor.seal,
+  proof: anchor.merkleProof,
+  receiver: bobAddress
+});
+```
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+For more information, see:
+- CROSS-CHAIN-ARCHITECTURE.md
+- packages/core-vm/ (Rust source)
+- packages/indexer/ (TypeScript source)
+- packages/sdk/ (JavaScript SDK)
