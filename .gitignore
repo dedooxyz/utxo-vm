@@ -8,16 +8,19 @@ target/
 .env
 .env.local
 
-# SQLite database files
+# Database files
 *.db
 *.db-shm
 *.db-wal
+*.redb
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/*.redb
 **/data/*.db
 **/data/*.db-shm
 **/data/*.db-wal
+**/data/*.redb
 
 # LaTeX build artifacts
 *.aux

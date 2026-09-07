@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "packages/core-vm",
+    "packages/node",
 ]
 resolver = "2"

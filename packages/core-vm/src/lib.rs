@@ -2,6 +2,7 @@ pub mod gas;
 pub mod host_functions;
 pub mod runtime;
 pub mod state;
+pub mod zk;
 
 pub use gas::GasMeter;
 pub use host_functions::HostContext;
