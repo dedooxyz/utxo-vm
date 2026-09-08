@@ -74,6 +74,26 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     minRelayFee: 1000,
     dustLimit: 546,
   },
+  PEP: {
+    name: "Pepecoin",
+    ticker: "PEP",
+    p2pkhPrefix: 0x3b,
+    p2shPrefix: 0x05,
+    wifPrefix: 0x80,
+    rpcDefaultPort: 42069,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
+  LKY: {
+    name: "Luckycoin",
+    ticker: "LKY",
+    p2pkhPrefix: 0x30,
+    p2shPrefix: 0x05,
+    wifPrefix: 0xb0,
+    rpcDefaultPort: 9332,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
 };
 
 export function getChainConfig(tickerOrName: string): ChainConfig {

@@ -9,20 +9,21 @@ async fn test_p2p_dht_contract_and_gossip() {
     let port1 = 28410;
     let port2 = 28411;
 
-    let (p2p1, handle1) = P2pService::new(port1, vec![]);
+    let (p2p1, handle1) = P2pService::new(port1, vec![], None);
     let (attestation_tx1, mut attestation_rx1) = mpsc::channel::<StateAttestation>(10);
 
     tokio::spawn(async move {
-        let _ = p2p1.run(Some(attestation_tx1)).await;
+        let _ = p2p1.run(Some(attestation_tx1), None).await;
     });
 
     let (p2p2, handle2) = P2pService::new(
         port2,
         vec![format!("/ip4/127.0.0.1/tcp/{}", port1)],
+        None,
     );
 
     tokio::spawn(async move {
-        let _ = p2p2.run(None).await;
+        let _ = p2p2.run(None, None).await;
     });
 
     // Allow swarms a moment to initialize listeners

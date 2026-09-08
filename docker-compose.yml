@@ -1,52 +1,72 @@
-version: "3.8"
-
 services:
-  # Testnet indexer (default)
-  indexer:
-    build: .
-    container_name: utxo-vm-indexer
+  utxo-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.vmd
+    image: utxo-vmd:local
+    container_name: utxo-node-1
     restart: unless-stopped
+    command: >
+      --chain JKC_TESTNET
+      --rpc-port 9773
+      --p2p-port 2232
+      --data-dir /app/data
     ports:
       - "9773:9773"
+      - "2232:2232"
     environment:
-      - CHAIN=${CHAIN:-JKC_TESTNET}
-      - CHAIN_CONFIG_PATH=/app/chain.json
-      - DB_PATH=/app/data/indexer.db
-      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-30000}
-      - PORT=9773
+      - RUST_LOG=info,utxo_vmd=debug
+      - CHAIN=JKC_TESTNET
+      - ELECTRS_URL=http://electrs:3000
     volumes:
-      - indexer-data:/app/data
+      - node1-data:/app/data
+    networks:
+      - utxo-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9773/api/v1/chain/info"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9773/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
-  # Mainnet indexer (when opcodes supported)
-  indexer-mainnet:
-    build: .
-    container_name: utxo-vm-indexer-mainnet
+  utxo-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.vmd
+    image: utxo-vmd:local
+    container_name: utxo-node-2
     restart: unless-stopped
-    profiles:
-      - mainnet
+    command: >
+      --chain JKC_TESTNET
+      --rpc-port 9773
+      --p2p-port 2232
+      --data-dir /app/data
+      --bootstrap-peers /ip4/utxo-node-1/tcp/2232
     ports:
       - "9774:9773"
+      - "2233:2232"
     environment:
-      - CHAIN=${CHAIN:-JKC}
-      - CHAIN_CONFIG_PATH=/app/chain.json
-      - DB_PATH=/app/data/indexer-mainnet.db
-      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-30000}
-      - PORT=9773
+      - RUST_LOG=info,utxo_vmd=debug
+      - CHAIN=JKC_TESTNET
+      - ELECTRS_URL=http://electrs:3000
     volumes:
-      - indexer-mainnet-data:/app/data
+      - node2-data:/app/data
+    depends_on:
+      utxo-node-1:
+        condition: service_healthy
+    networks:
+      - utxo-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9773/api/v1/chain/info"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9773/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
+
+networks:
+  utxo-net:
+    driver: bridge
 
 volumes:
-  indexer-data:
-  indexer-mainnet-data:
+  node1-data:
+  node2-data:

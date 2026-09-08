@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use redb::{Database, ReadableTable, TableDefinition};
 use sha2::{Digest, Sha256};
+use tracing;
 use crate::storage::smt::SparseMerkleTree;
 use crate::types::{BlockRecord, SmartObjectRecord, SmtInclusionProof, StateTransitionRecord, UndoLogRecord};
 
@@ -102,7 +103,14 @@ impl StateStore {
         // Update in-memory SMT
         let key_hash = Self::hash_key(&obj.object_id);
         let val_hash = Self::hash_object(obj);
-        self.smt.write().unwrap().update(key_hash, val_hash);
+        match self.smt.write() {
+            Ok(mut smt) => {
+                smt.update(key_hash, val_hash);
+            }
+            Err(e) => {
+                tracing::error!("[Storage] Failed to acquire write lock on SMT: {}", e);
+            }
+        }
 
         Ok(())
     }
@@ -214,13 +222,24 @@ impl StateStore {
     }
 
     pub fn current_state_root(&self) -> String {
-        let root = self.smt.read().unwrap().root();
-        hex::encode(root)
+        match self.smt.write() {
+            Ok(mut smt) => hex::encode(smt.root()),
+            Err(e) => {
+                tracing::error!("[Storage] Failed to acquire write lock on SMT: {}", e);
+                String::new()
+            }
+        }
     }
 
     pub fn get_state_proof(&self, object_id: &str) -> Option<SmtInclusionProof> {
         let key_hash = Self::hash_key(object_id);
-        self.smt.read().unwrap().get_proof(&key_hash)
+        match self.smt.read() {
+            Ok(smt) => smt.get_proof(&key_hash),
+            Err(e) => {
+                tracing::error!("[Storage] Failed to acquire read lock on SMT: {}", e);
+                None
+            }
+        }
     }
 
     pub fn save_undo_log(&self, undo: &UndoLogRecord) -> Result<()> {
@@ -305,7 +324,15 @@ impl StateStore {
             let v = Self::hash_object(&obj);
             new_smt.update(k, v);
         }
-        *self.smt.write().unwrap() = new_smt;
+        
+        match self.smt.write() {
+            Ok(mut smt) => {
+                *smt = new_smt;
+            }
+            Err(e) => {
+                tracing::error!("[Storage] Failed to acquire write lock on SMT for rebuild: {}", e);
+            }
+        }
 
         Ok(rolled_back)
     }

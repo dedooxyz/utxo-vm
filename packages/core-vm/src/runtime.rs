@@ -26,6 +26,7 @@ pub struct ExecutionResult {
     pub events: Vec<EventLog>,
     pub created_objects: Vec<CreatedObject>,
     pub stealth_settlements: Vec<StealthSettlement>,
+    pub mweb_peg_outs: Vec<StealthSettlement>,
 }
 
 pub struct VmRuntime {
@@ -68,6 +69,7 @@ impl VmRuntime {
         // host_get_caller(out_ptr: i32) -> i32
         linker
             .func_wrap("env", "host_get_caller", |mut caller: Caller<'_, HostContext>, out_ptr: i32| -> i32 {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(100)); }
                 let caller_str = caller.data().caller.clone();
                 let bytes = caller_str.as_bytes();
                 if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
@@ -81,7 +83,8 @@ impl VmRuntime {
 
         // host_get_satoshis() -> u64
         linker
-            .func_wrap("env", "host_get_satoshis", |caller: Caller<'_, HostContext>| -> u64 {
+            .func_wrap("env", "host_get_satoshis", |mut caller: Caller<'_, HostContext>| -> u64 {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(100)); }
                 caller.data().satoshis
             })
             .map_err(|e| e.to_string())?;
@@ -89,6 +92,7 @@ impl VmRuntime {
         // host_get_seal(out_ptr: i32) -> i32
         linker
             .func_wrap("env", "host_get_seal", |mut caller: Caller<'_, HostContext>, out_ptr: i32| -> i32 {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(100)); }
                 let seal_str = format!("{}:{}", caller.data().seal.txid, caller.data().seal.vout);
                 let bytes = seal_str.as_bytes();
                 if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
@@ -103,6 +107,7 @@ impl VmRuntime {
         // host_emit_event(topic_ptr: i32, data_ptr: i32, len: i32)
         linker
             .func_wrap("env", "host_emit_event", |mut caller: Caller<'_, HostContext>, topic_ptr: i32, data_ptr: i32, len: i32| {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(500)); }
                 if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
                     let topic = Self::read_guest_string(&caller, &mem, topic_ptr as usize, 64);
                     let mut data_buf = vec![0u8; len.max(0) as usize];
@@ -120,6 +125,7 @@ impl VmRuntime {
         // host_create_object(code_hash_ptr: i32, state_ptr: i32, satoshis: u64) -> i32
         linker
             .func_wrap("env", "host_create_object", |mut caller: Caller<'_, HostContext>, code_hash_ptr: i32, state_ptr: i32, satoshis: u64| -> i32 {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(1000)); }
                 if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
                     let code_hash = Self::read_guest_string(&caller, &mem, code_hash_ptr as usize, 64);
                     let initial_state = Self::read_guest_string(&caller, &mem, state_ptr as usize, 1024);
@@ -138,6 +144,7 @@ impl VmRuntime {
         // host_stealth_settle(stealth_addr_ptr: i32, satoshis: u64) -> i32
         linker
             .func_wrap("env", "host_stealth_settle", |mut caller: Caller<'_, HostContext>, stealth_addr_ptr: i32, satoshis: u64| -> i32 {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(500)); }
                 if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
                     let stealth_address = Self::read_guest_string(&caller, &mem, stealth_addr_ptr as usize, 128);
                     caller.data_mut().stealth_settlements.push(StealthSettlement {
@@ -154,6 +161,7 @@ impl VmRuntime {
         // host_mweb_peg_out(stealth_addr_ptr: i32, satoshis: u64) -> i32
         linker
             .func_wrap("env", "host_mweb_peg_out", |mut caller: Caller<'_, HostContext>, stealth_addr_ptr: i32, satoshis: u64| -> i32 {
+                if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(500)); }
                 if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
                     let stealth_address = Self::read_guest_string(&caller, &mem, stealth_addr_ptr as usize, 128);
                     caller.data_mut().mweb_peg_outs.push(StealthSettlement {
@@ -180,6 +188,7 @@ impl VmRuntime {
                  inputs_ptr: i32,
                  inputs_len: i32|
                  -> i32 {
+                    if let Ok(_fuel) = caller.get_fuel() { let _ = caller.set_fuel(_fuel.saturating_sub(10000)); }
                     if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
                         let mut vk_buf = vec![0u8; vk_len.max(0) as usize];
                         let mut proof_buf = vec![0u8; proof_len.max(0) as usize];
@@ -209,7 +218,7 @@ impl VmRuntime {
         // Built-in abort handler for AssemblyScript
         linker
             .func_wrap("env", "abort", |_caller: Caller<'_, HostContext>, _msg: i32, _file: i32, _line: i32, _col: i32| {
-                println!("[VM] AssemblyScript abort called");
+                tracing::warn!("[VM] AssemblyScript abort called");
             })
             .map_err(|e| e.to_string())?;
 
@@ -286,6 +295,7 @@ impl VmRuntime {
             events: data.events,
             created_objects: data.created_objects,
             stealth_settlements: data.stealth_settlements,
+            mweb_peg_outs: data.mweb_peg_outs,
         })
     }
 
@@ -367,6 +377,7 @@ impl VmRuntime {
             events: data.events,
             created_objects: data.created_objects,
             stealth_settlements: data.stealth_settlements,
+            mweb_peg_outs: data.mweb_peg_outs,
         })
     }
 }

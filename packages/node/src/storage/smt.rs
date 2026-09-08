@@ -25,11 +25,14 @@ pub fn hash_leaf(key: &[u8; 32], value: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-/// Sparse Merkle Tree (SMT) with 256-bit keys and values
+/// Sparse Merkle Tree (SMT) with 256-bit keys and values.
+/// The root is cached and only recomputed when leaves change.
 #[derive(Clone, Debug)]
 pub struct SparseMerkleTree {
     pub leaves: BTreeMap<[u8; 32], [u8; 32]>,
     empty_hashes: Vec<[u8; 32]>,
+    cached_root: [u8; 32],
+    dirty: bool,
 }
 
 impl Default for SparseMerkleTree {
@@ -50,7 +53,9 @@ impl SparseMerkleTree {
 
         Self {
             leaves: BTreeMap::new(),
-            empty_hashes,
+            empty_hashes: empty_hashes.clone(),
+            cached_root: empty_hashes[TREE_DEPTH],
+            dirty: false,
         }
     }
 
@@ -61,6 +66,7 @@ impl SparseMerkleTree {
         } else {
             self.leaves.insert(key, value);
         }
+        self.dirty = true;
     }
 
     /// Get value for a key
@@ -68,23 +74,16 @@ impl SparseMerkleTree {
         self.leaves.get(key)
     }
 
-    /// Compute the 32-byte Merkle root
-    pub fn root(&self) -> [u8; 32] {
+    fn compute_root(&self) -> [u8; 32] {
         if self.leaves.is_empty() {
             return self.empty_hashes[TREE_DEPTH];
         }
 
-        // Fast tree calculation over active leaves
-        // We sort the hashed leaves and construct the canonical binary Merkle root
         let mut level_hashes: Vec<[u8; 32]> = self
             .leaves
             .iter()
             .map(|(k, v)| hash_leaf(k, v))
             .collect();
-
-        if level_hashes.is_empty() {
-            return self.empty_hashes[TREE_DEPTH];
-        }
 
         while level_hashes.len() > 1 {
             let mut next_level = Vec::with_capacity((level_hashes.len() + 1) / 2);
@@ -92,6 +91,7 @@ impl SparseMerkleTree {
                 if chunk.len() == 2 {
                     next_level.push(hash_node(&chunk[0], &chunk[1]));
                 } else {
+                    // Odd leaf: hash with itself (standard Merkle behavior)
                     next_level.push(hash_node(&chunk[0], &chunk[0]));
                 }
             }
@@ -101,10 +101,18 @@ impl SparseMerkleTree {
         level_hashes[0]
     }
 
+    /// Compute the 32-byte Merkle root (cached, O(1) if no changes)
+    pub fn root(&mut self) -> [u8; 32] {
+        if self.dirty {
+            self.cached_root = self.compute_root();
+            self.dirty = false;
+        }
+        self.cached_root
+    }
+
     /// Generate an inclusion proof for a key
     pub fn get_proof(&self, key: &[u8; 32]) -> Option<SmtInclusionProof> {
         let value = self.leaves.get(key)?;
-        let _target_leaf = hash_leaf(key, value);
 
         let leaves_list: Vec<([u8; 32], [u8; 32])> = self.leaves.iter().map(|(&k, &v)| (k, v)).collect();
         let target_idx = leaves_list.iter().position(|(k, _)| k == key)?;
@@ -147,7 +155,7 @@ impl SparseMerkleTree {
         };
 
         // Self-verify
-        let verified = Self::verify_proof(&root_bytes, key, value, &proof_path);
+        let verified = Self::verify_proof_static(&root_bytes, key, value, &proof_path);
 
         Some(SmtInclusionProof {
             key_hex: hex::encode(key),
@@ -158,8 +166,8 @@ impl SparseMerkleTree {
         })
     }
 
-    /// Verify an inclusion proof mathematically
-    pub fn verify_proof(
+    /// Verify an inclusion proof mathematically (static, no tree access needed)
+    pub fn verify_proof_static(
         root: &[u8; 32],
         key: &[u8; 32],
         value: &[u8; 32],
@@ -185,6 +193,26 @@ impl SparseMerkleTree {
         }
 
         current == *root
+    }
+
+    /// Verify an inclusion proof mathematically (compatible with existing API)
+    pub fn verify_proof(
+        root: &[u8; 32],
+        key: &[u8; 32],
+        value: &[u8; 32],
+        proof_path: &[SmtProofNode],
+    ) -> bool {
+        Self::verify_proof_static(root, key, value, proof_path)
+    }
+
+    /// Get the number of leaves in the tree
+    pub fn len(&self) -> usize {
+        self.leaves.len()
+    }
+
+    /// Check if the tree is empty
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
     }
 }
 
@@ -217,5 +245,42 @@ mod tests {
         let tampered_val = [99u8; 32];
         let invalid = SparseMerkleTree::verify_proof(&root, &key2, &tampered_val, &proof.proof_path);
         assert_eq!(invalid, false);
+    }
+
+    #[test]
+    fn test_smt_root_caching() {
+        let mut smt = SparseMerkleTree::new();
+        let key1 = [1u8; 32];
+        let val1 = [10u8; 32];
+
+        // Initial root should be empty
+        let root1 = smt.root();
+        assert_eq!(root1, smt.empty_hashes[TREE_DEPTH]);
+
+        // Update and get root
+        smt.update(key1, val1);
+        let root2 = smt.root();
+        assert_ne!(root2, root1);
+
+        // Same root without changes (cached)
+        let root3 = smt.root();
+        assert_eq!(root2, root3);
+        assert!(!smt.dirty);
+
+        // Update again
+        smt.update(key1, [99u8; 32]);
+        let root4 = smt.root();
+        assert_ne!(root4, root2);
+    }
+
+    #[test]
+    fn test_smt_len() {
+        let mut smt = SparseMerkleTree::new();
+        assert_eq!(smt.len(), 0);
+        assert!(smt.is_empty());
+
+        smt.update([1u8; 32], [10u8; 32]);
+        assert_eq!(smt.len(), 1);
+        assert!(!smt.is_empty());
     }
 }

@@ -4,13 +4,14 @@ use anyhow::Result;
 use secp256k1::ecdsa::Signature;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
-use crate::types::StateAttestation;
+use crate::types::{EquivocationProof, StateAttestation};
 
 pub struct ConsensusManager {
     secp: Secp256k1<secp256k1::All>,
     pub known_validators: Arc<RwLock<HashSet<String>>>, // Set of hex pubkeys
     // (chain, height) -> Vec<StateAttestation>
     pub attestations: Arc<RwLock<HashMap<(String, u64), Vec<StateAttestation>>>>,
+    pub slashing_proofs: Arc<RwLock<Vec<EquivocationProof>>>,
     pub quorum_threshold: usize,
 }
 
@@ -20,15 +21,20 @@ impl ConsensusManager {
             secp: Secp256k1::new(),
             known_validators: Arc::new(RwLock::new(HashSet::new())),
             attestations: Arc::new(RwLock::new(HashMap::new())),
+            slashing_proofs: Arc::new(RwLock::new(Vec::new())),
             quorum_threshold,
         }
     }
 
     pub fn register_validator(&self, pubkey_hex: &str) {
-        self.known_validators
-            .write()
-            .unwrap()
-            .insert(pubkey_hex.to_string());
+        match self.known_validators.write() {
+            Ok(mut validators) => {
+                validators.insert(pubkey_hex.to_string());
+            }
+            Err(e) => {
+                tracing::error!("[Consensus] Failed to acquire write lock on known_validators: {}", e);
+            }
+        }
     }
 
     pub fn hash_attestation_payload(chain: &str, height: u64, block_hash: &str, state_root: &str) -> [u8; 32] {
@@ -103,34 +109,111 @@ impl ConsensusManager {
             return false;
         }
 
-        let key = (attestation.chain.clone(), attestation.block_height);
-        let mut guard = self.attestations.write().unwrap();
-        let list = guard.entry(key).or_default();
-
-        // Check duplicate from same validator
-        if list.iter().any(|a| a.validator_pubkey == attestation.validator_pubkey) {
-            return false;
+        // Check if validator is registered
+        match self.known_validators.read() {
+            Ok(validators) => {
+                if !validators.is_empty() && !validators.contains(&attestation.validator_pubkey) {
+                    tracing::warn!(
+                        "[Consensus] Rejected attestation from unregistered validator: {}",
+                        attestation.validator_pubkey
+                    );
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::error!("[Consensus] Failed to acquire read lock on known_validators: {}", e);
+                return false;
+            }
         }
 
-        list.push(attestation);
-        true
+        let key = (attestation.chain.clone(), attestation.block_height);
+        
+        match self.attestations.write() {
+            Ok(mut guard) => {
+                let list = guard.entry(key).or_default();
+
+                // Check duplicate from same validator
+                if let Some(existing) = list.iter().find(|a| a.validator_pubkey == attestation.validator_pubkey) {
+                    if existing.state_root != attestation.state_root {
+                        let proof = EquivocationProof {
+                            chain: attestation.chain.clone(),
+                            block_height: attestation.block_height,
+                            validator_pubkey: attestation.validator_pubkey.clone(),
+                            first_attestation: existing.clone(),
+                            second_attestation: attestation.clone(),
+                            detected_at: chrono::Utc::now().timestamp(),
+                        };
+                        tracing::error!(
+                            "[Slashing] CRITICAL: Equivocation detected for validator {} on chain {} at height #{}! Conflicting roots: {} vs {}",
+                            proof.validator_pubkey,
+                            proof.chain,
+                            proof.block_height,
+                            proof.first_attestation.state_root,
+                            proof.second_attestation.state_root
+                        );
+                        if let Ok(mut proofs) = self.slashing_proofs.write() {
+                            proofs.push(proof);
+                        }
+                    }
+                    return false;
+                }
+
+                list.push(attestation);
+                true
+            }
+            Err(e) => {
+                tracing::error!("[Consensus] Failed to acquire write lock on attestations: {}", e);
+                false
+            }
+        }
     }
 
     pub fn is_quorum_reached(&self, chain: &str, height: u64, state_root: &str) -> bool {
-        let guard = self.attestations.read().unwrap();
-        let key = (chain.to_string(), height);
-        if let Some(list) = guard.get(&key) {
-            let matching_count = list.iter().filter(|a| a.state_root == state_root).count();
-            matching_count >= self.quorum_threshold
-        } else {
-            false
+        match self.attestations.read() {
+            Ok(guard) => {
+                let key = (chain.to_string(), height);
+                if let Some(list) = guard.get(&key) {
+                    let matching_count = list.iter().filter(|a| a.state_root == state_root).count();
+                    matching_count >= self.quorum_threshold
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                tracing::error!("[Consensus] Failed to acquire read lock on attestations: {}", e);
+                false
+            }
         }
     }
 
     pub fn get_attestations(&self, chain: &str, height: u64) -> Vec<StateAttestation> {
-        let guard = self.attestations.read().unwrap();
-        let key = (chain.to_string(), height);
-        guard.get(&key).cloned().unwrap_or_default()
+        match self.attestations.read() {
+            Ok(guard) => {
+                let key = (chain.to_string(), height);
+                guard.get(&key).cloned().unwrap_or_default()
+            }
+            Err(e) => {
+                tracing::error!("[Consensus] Failed to acquire read lock on attestations: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn get_validator_count(&self) -> usize {
+        match self.known_validators.read() {
+            Ok(validators) => validators.len(),
+            Err(_) => 0,
+        }
+    }
+
+    pub fn get_slashing_proofs(&self) -> Vec<EquivocationProof> {
+        match self.slashing_proofs.read() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::error!("[Consensus] Failed to acquire read lock on slashing_proofs: {}", e);
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -152,5 +235,36 @@ mod tests {
         assert_eq!(mgr.add_attestation(attestation), true);
         assert_eq!(mgr.is_quorum_reached("JKC", 100, "state_root_123"), true);
         assert_eq!(mgr.is_quorum_reached("JKC", 100, "wrong_root"), false);
+    }
+
+    #[test]
+    fn test_equivocation_detection_and_slashing_proof() {
+        let mgr = ConsensusManager::new(1);
+        let secp = Secp256k1::new();
+        let (sk, _pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+
+        // Sign first valid root
+        let att1 = mgr
+            .sign_state_root(&sk, "DOGE", 500, "hash_500", "root_canonical")
+            .unwrap();
+        assert_eq!(mgr.add_attestation(att1), true);
+
+        // Sign conflicting root on the same height (double-signing / equivocation)
+        let att2 = mgr
+            .sign_state_root(&sk, "DOGE", 500, "hash_500", "root_malicious_fork")
+            .unwrap();
+        assert_eq!(mgr.add_attestation(att2), false);
+
+        // Verify slashing proof was captured
+        let proofs = mgr.get_slashing_proofs();
+        assert_eq!(proofs.len(), 1);
+        let proof = &proofs[0];
+        assert_eq!(proof.chain, "DOGE");
+        assert_eq!(proof.block_height, 500);
+        assert_eq!(proof.first_attestation.state_root, "root_canonical");
+        assert_eq!(proof.second_attestation.state_root, "root_malicious_fork");
+
+        // Verify cryptographic validity of the proof
+        assert!(crate::consensus::covenants::verify_equivocation_proof(proof));
     }
 }

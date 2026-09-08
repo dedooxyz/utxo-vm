@@ -6,8 +6,10 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use utxo_vmd::consensus::ConsensusManager;
+use utxo_vmd::cross_chain::{BridgeManager, CrossChainVerifier, StateRelay};
 use utxo_vmd::p2p::P2pService;
 use utxo_vmd::rpc::{create_router, AppState};
+use utxo_vmd::rpc::server::RateLimiter;
 use utxo_vmd::storage::StateStore;
 use utxo_vmd::types::SmartObjectRecord;
 
@@ -35,11 +37,16 @@ async fn test_rpc_endpoints_and_merkle_proof() {
     store.save_object(&obj).expect("Save object failed");
     store.set_last_sync_block("JKC_TESTNET", 50).unwrap();
 
-    let (p2p_service, p2p_handle) = P2pService::new(29991, vec![]);
+    let (p2p_service, p2p_handle) = P2pService::new(29991, vec![], None);
     tokio::spawn(async move {
-        let _ = p2p_service.run(None).await;
+        let _ = p2p_service.run(None, None).await;
     });
     let consensus = Arc::new(ConsensusManager::new(1));
+
+    // Initialize cross-chain components
+    let verifier = Arc::new(CrossChainVerifier::new(consensus.clone()));
+    let bridge = Arc::new(BridgeManager::new(verifier, store.clone()));
+    let relay = Arc::new(StateRelay::new(store.clone(), consensus.clone()));
 
     let app_state = AppState {
         store: store.clone(),
@@ -47,7 +54,12 @@ async fn test_rpc_endpoints_and_merkle_proof() {
         consensus,
         chain: "JKC_TESTNET".to_string(),
         electrs_url: "https://jkc-testnet-api.s3na.xyz".to_string(),
+        rate_limit_rps: 100,
+        bridge,
+        relay,
+        rate_limiter: Arc::new(RateLimiter::new(100)),
     };
+
 
     let app = create_router(app_state);
 

@@ -9,6 +9,7 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use utxo_vmd::consensus::ConsensusManager;
+use utxo_vmd::cross_chain::{BridgeManager, CrossChainVerifier, StateRelay};
 use utxo_vmd::p2p::{P2pService, DEFAULT_P2P_PORT};
 use utxo_vmd::rpc::{create_router, AppState};
 use utxo_vmd::scanner::{BlockProcessor, ElectrsClient};
@@ -21,8 +22,8 @@ struct Cli {
     #[arg(long, env = "CHAIN", default_value = "JKC_TESTNET")]
     chain: String,
 
-    #[arg(long, env = "ELECTRS_URL", default_value = "https://jkc-testnet-api.s3na.xyz")]
-    electrs_url: String,
+    #[arg(long, env = "ELECTRS_URL")]
+    electrs_url: Option<String>,
 
     #[arg(long, env = "DB_PATH", default_value = "./data/utxovm.redb")]
     db_path: PathBuf,
@@ -47,25 +48,79 @@ struct Cli {
 
     #[arg(long, env = "SYNC_INTERVAL_SECS", default_value_t = 15)]
     sync_interval_secs: u64,
+
+    #[arg(long, env = "MIN_EXECUTION_FEE", default_value_t = 0)]
+    min_execution_fee: u64,
+
+    #[arg(long, env = "FEE_COLLECTOR")]
+    fee_collector: Option<String>,
+
+    #[arg(long, env = "P2P_KEY_PATH", default_value = "./data/p2p_identity.key")]
+    p2p_key_path: PathBuf,
+
+    #[arg(long, env = "RATE_LIMIT_RPS", default_value_t = 100)]
+    rate_limit_rps: u64,
+
+    #[arg(long, env = "MAX_WASM_SIZE_MB", default_value_t = 1)]
+    max_wasm_size_mb: usize,
+
+    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+    log_level: String,
+
+    #[arg(long, env = "ELECTRS_TIMEOUT_SECS", default_value_t = 15)]
+    electrs_timeout_secs: u64,
+
+    #[arg(long, env = "P2P_COMMAND_TIMEOUT_SECS", default_value_t = 5)]
+    p2p_command_timeout_secs: u64,
+
+    #[arg(long, env = "CHANNEL_SIZE", default_value_t = 100)]
+    channel_size: usize,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Parse log level from CLI/env
+    let log_level = match cli.log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::INFO,
+    };
+
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(log_level)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .context("Setting default subscriber failed")?;
 
-    let cli = Cli::parse();
+    // Resolve Electrs URL based on chain if not provided
+    let electrs_url = cli.electrs_url.unwrap_or_else(|| {
+        match cli.chain.to_uppercase().as_str() {
+            "JKC" | "JKC_MAINNET" => "https://junk-api.s3na.xyz".to_string(),
+            "JKC_TESTNET" | "TESTNET" => "https://jkc-testnet-api.s3na.xyz".to_string(),
+            "DOGE" | "DOGE_MAINNET" => "https://doge-api.s3na.xyz".to_string(),
+            "LTC" | "LTC_MAINNET" => "https://ltc-api.s3na.xyz".to_string(),
+            "BTC" | "BTC_MAINNET" => "https://btc-api.s3na.xyz".to_string(),
+            "PEP" | "PEP_MAINNET" => "https://pepe-api.s3na.xyz".to_string(),
+            "LKY" | "LKY_MAINNET" => "https://lky-api.s3na.xyz".to_string(),
+            "BEL" | "BEL_MAINNET" => "https://bel-api.s3na.xyz".to_string(),
+            _ => "https://jkc-testnet-api.s3na.xyz".to_string(),
+        }
+    });
 
     info!("============================================================");
     info!("Starting UTXO-VM Daemon (utxo-vmd)");
     info!("Chain:        {}", cli.chain);
-    info!("Electrs:      {}", cli.electrs_url);
+    info!("Electrs:      {}", electrs_url);
     info!("P2P Port:     {} (Default: 2232)", cli.p2p_port);
     info!("RPC Port:     {}", cli.rpc_port);
     info!("DB Path:      {:?}", cli.db_path);
+    info!("Min Fee:      {} sats", cli.min_execution_fee);
+    info!("Fee Collector: {:?}", cli.fee_collector);
     info!("============================================================");
 
     // Create database parent directories if needed
@@ -78,11 +133,12 @@ async fn main() -> Result<()> {
     info!("[Storage] Initialized Redb + Sparse Merkle Tree (Current Root: {})", store.current_state_root());
 
     // Initialize P2P Swarm
-    let (attestation_tx, mut attestation_rx) = mpsc::channel::<StateAttestation>(100);
-    let (p2p_service, p2p_handle) = P2pService::new(cli.p2p_port, cli.bootstrap_peers);
+    let (attestation_tx, mut attestation_rx) = mpsc::channel::<StateAttestation>(cli.channel_size);
+    let (mempool_tx, mut mempool_rx) = mpsc::channel::<Vec<u8>>(cli.channel_size);
+    let (p2p_service, p2p_handle) = P2pService::new(cli.p2p_port, cli.bootstrap_peers, Some(cli.p2p_key_path));
 
     tokio::spawn(async move {
-        if let Err(e) = p2p_service.run(Some(attestation_tx)).await {
+        if let Err(e) = p2p_service.run(Some(attestation_tx), Some(mempool_tx)).await {
             error!("[P2P] Fatal error in P2P service: {:?}", e);
         }
     });
@@ -104,8 +160,38 @@ async fn main() -> Result<()> {
     });
 
     // Initialize Electrs client & processor
-    let electrs = ElectrsClient::new(cli.electrs_url.clone());
-    let processor = Arc::new(BlockProcessor::new(store.clone(), cli.chain.clone()));
+    let electrs = ElectrsClient::with_timeout(electrs_url.clone(), cli.electrs_timeout_secs);
+    let processor = Arc::new(BlockProcessor::new(
+        store.clone(),
+        cli.chain.clone(),
+        cli.min_execution_fee,
+        cli.fee_collector.clone(),
+    ));
+
+    // Process incoming mempool transactions
+    let processor_mempool = processor.clone();
+    tokio::spawn(async move {
+        while let Some(tx_bytes) = mempool_rx.recv().await {
+            match serde_json::from_slice::<utxo_vmd::scanner::electrs::ElectrsTx>(&tx_bytes) {
+                Ok(tx) => {
+                    match processor_mempool.process_tx(&tx, 0) {
+                        Ok(Some(obj_id)) => {
+                            info!("[Mempool] Processed transaction for object: {}", obj_id);
+                        }
+                        Ok(None) => {
+                            // No envelope found, skip
+                        }
+                        Err(e) => {
+                            warn!("[Mempool] Failed to process mempool tx: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("[Mempool] Failed to deserialize mempool tx: {:?}", e);
+                }
+            }
+        }
+    });
 
     // Background Block Sync Loop
     let store_sync = store.clone();
@@ -175,12 +261,21 @@ async fn main() -> Result<()> {
     });
 
     // Start Axum HTTP RPC Server
+    // Initialize cross-chain components
+    let verifier = Arc::new(CrossChainVerifier::new(consensus.clone()));
+    let bridge = Arc::new(BridgeManager::new(verifier, store.clone()));
+    let relay = Arc::new(StateRelay::new(store.clone(), consensus.clone()));
+
     let app_state = AppState {
         store,
         p2p: p2p_handle,
         consensus,
         chain: cli.chain,
-        electrs_url: cli.electrs_url,
+        electrs_url,
+        rate_limit_rps: cli.rate_limit_rps,
+        bridge,
+        relay,
+        rate_limiter: std::sync::Arc::new(utxo_vmd::rpc::server::RateLimiter::new(cli.rate_limit_rps)),
     };
 
     let router = create_router(app_state);
@@ -188,7 +283,21 @@ async fn main() -> Result<()> {
     info!("[RPC] Axum JSON-RPC Server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+
+    // Graceful shutdown on Ctrl+C
+    let shutdown_signal = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("[Shutdown] Failed to install Ctrl+C handler: {}", e);
+            return;
+        }
+        info!("[Shutdown] Received Ctrl+C, shutting down gracefully...");
+    };
+
+    let server = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal);
+
+    server.await?;
+    info!("[Shutdown] Daemon stopped cleanly.");
 
     Ok(())
 }

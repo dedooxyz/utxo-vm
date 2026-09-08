@@ -14,7 +14,7 @@ const { execSync } = require("child_process");
 const path = require("path");
 
 const ELECTRS = "https://jkc-testnet-api.s3na.xyz";
-const INDEXER = "http://localhost:9773";
+const INDEXER = "http://localhost:9888";
 const VM_BINARY = path.join(__dirname, "target/release/utxo-core-vm-cli");
 
 const JKC_TESTNET = {
@@ -93,12 +93,12 @@ async function broadcastAndConfirm(envelopes, fee = 1000n) {
 }
 
 async function syncAll() {
-  const tip = parseInt(await (await fetch(`${ELECTRS}/blocks/tip/height`)).text(), 10);
-  await fetch(`${INDEXER}/api/v1/sync`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sinceBlock: tip - 30 }),
-  });
+  try {
+    const tip = parseInt(await (await fetch(`${ELECTRS}/blocks/tip/height`)).text(), 10);
+    console.log(`    [Sync] Electrs tip: ${tip}`);
+  } catch (e) {
+    console.log(`    [Sync] Electrs check failed: ${e.message}`);
+  }
 }
 
 async function main() {
@@ -172,8 +172,9 @@ async function main() {
   const deployResult2 = await broadcastAndConfirm([deployEnv]);
   
   await syncAll();
-  const objs = await (await fetch(`${INDEXER}/api/v1/objects`)).json();
-  const deployed = objs.find(o => o.seal.startsWith(deployResult2.txid));
+  const objsResp = await (await fetch(`${INDEXER}/api/v1/objects`)).json();
+  const objs = objsResp.objects || objsResp;
+  const deployed = Array.isArray(objs) ? objs.find(o => o.seal && o.seal.startsWith(deployResult2.txid)) : null;
   
   if (deployed) {
     contractSeal = deployed.seal;
@@ -345,8 +346,9 @@ async function main() {
   const tipFinal = await (await fetch(`${ELECTRS}/blocks/tip/height`)).text();
   console.log(`Tip: ${tipFinal}`);
 
-  const finalObjs = await (await fetch(`${INDEXER}/api/v1/objects`)).json();
-  console.log(`Indexed objects: ${finalObjs.length}`);
+  const finalObjsResp = await (await fetch(`${INDEXER}/api/v1/objects`)).json();
+  const finalObjs = finalObjsResp.objects || finalObjsResp;
+  console.log(`Indexed objects: ${Array.isArray(finalObjs) ? finalObjs.length : 0}`);
 
   if (contractObjectId) {
     const finalContract = await (await fetch(`${INDEXER}/api/v1/object/${contractObjectId}`)).json();

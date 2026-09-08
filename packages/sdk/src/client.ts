@@ -2,6 +2,7 @@ import axios from "axios";
 import { InscriptionEnvelope } from "./envelope";
 import { UTXOWalletSigner } from "./wallet";
 import { ChainConfig, getChainConfig, SUPPORTED_CHAINS } from "./chains";
+import { SmtInclusionProof } from "./light_verifier";
 
 export interface SmartObjectStateResponse {
   objectId: string;
@@ -35,6 +36,26 @@ export interface SimulationResult {
   returnCode: number;
   updatedState: any;
   events: Array<{ topic: string; data: string }>;
+}
+
+export interface ObjectProofResponse {
+  object: SmartObjectStateResponse;
+  merkleProof: SmtInclusionProof;
+  verified: boolean;
+}
+
+export interface DhtContractResponse {
+  codeHash: string;
+  wasmHex: string;
+}
+
+export interface SlashingProof {
+  chain: string;
+  blockHeight: number;
+  validatorPubkey: string;
+  firstAttestation: any;
+  secondAttestation: any;
+  detectedAt: number;
 }
 
 export class UTXOClient {
@@ -90,6 +111,29 @@ export class UTXOClient {
 
   async getChainInfo(): Promise<any> {
     const resp = await axios.get(`${this.nodeUrl}/api/v1/chain/info`);
+    return resp.data;
+  }
+
+  async getObjectProof(objectId: string): Promise<ObjectProofResponse> {
+    const resp = await axios.get(`${this.nodeUrl}/api/v1/object/${objectId}/proof`);
+    return resp.data;
+  }
+
+  async publishContractDht(codeHash: string, wasmHex: string): Promise<{ status: string; codeHash: string }> {
+    const resp = await axios.post(`${this.nodeUrl}/api/v1/dht/contract`, {
+      code_hash: codeHash,
+      wasm_hex: wasmHex,
+    });
+    return resp.data;
+  }
+
+  async getContractDht(codeHash: string): Promise<DhtContractResponse> {
+    const resp = await axios.get(`${this.nodeUrl}/api/v1/dht/contract/${codeHash}`);
+    return resp.data;
+  }
+
+  async getSlashingProofs(): Promise<{ count: number; proofs: SlashingProof[] }> {
+    const resp = await axios.get(`${this.nodeUrl}/api/v1/consensus/slashing-proofs`);
     return resp.data;
   }
 }

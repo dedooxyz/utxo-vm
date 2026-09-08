@@ -31,10 +31,14 @@ pub struct ElectrsClient {
 
 impl ElectrsClient {
     pub fn new(base_url: String) -> Self {
+        Self::with_timeout(base_url, 15)
+    }
+
+    pub fn with_timeout(base_url: String, timeout_secs: u64) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()
                 .unwrap_or_default(),
         }

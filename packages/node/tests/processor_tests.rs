@@ -8,7 +8,7 @@ fn test_processor_create_and_call() {
     let db_path = temp_dir.path().join("test_processor.redb");
 
     let store = StateStore::open(&db_path).expect("StateStore open failed");
-    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string());
+    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), 0, None);
 
     // 1. Transaction that creates a Smart Object
     let mut create_script = vec![0x6a];
@@ -80,4 +80,126 @@ fn test_processor_create_and_call() {
     assert!(store.get_object_by_seal("1111111111111111111111111111111111111111111111111111111111111111:0").unwrap().is_none());
     // New seal resolves to the updated object
     assert!(store.get_object_by_seal("2222222222222222222222222222222222222222222222222222222222222222:0").unwrap().is_some());
+}
+
+#[test]
+fn test_fee_enforcement_with_min_fee() {
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_fee.redb");
+
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let min_fee = 1000;
+    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), min_fee, None);
+
+    // Transaction with insufficient fee (500 < 1000)
+    let mut create_script = vec![0x6a];
+    create_script.extend_from_slice(b"utxovm");
+    create_script.extend_from_slice(br#"{"op":"create","code_hash":"wasm_token"}"#);
+
+    let tx_no_fee = ElectrsTx {
+        txid: "3333333333333333333333333333333333333333333333333333333333333333".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 500, // Less than min_fee
+            scriptpubkey: hex::encode(&create_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&create_script)),
+        }],
+    };
+
+    // Should be rejected due to insufficient fee
+    let result = processor.process_tx(&tx_no_fee, 200).expect("Process should not error");
+    assert!(result.is_none(), "Transaction with insufficient fee should be rejected");
+
+    // Transaction with sufficient fee (1500 >= 1000)
+    let tx_with_fee = ElectrsTx {
+        txid: "4444444444444444444444444444444444444444444444444444444444444444".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 1500, // Greater than min_fee
+            scriptpubkey: hex::encode(&create_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&create_script)),
+        }],
+    };
+
+    // Should be accepted
+    let result = processor.process_tx(&tx_with_fee, 201).expect("Process should succeed");
+    assert!(result.is_some(), "Transaction with sufficient fee should be accepted");
+}
+
+#[test]
+fn test_fee_enforcement_with_collector() {
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_fee_collector.redb");
+
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let min_fee = 1000;
+    let fee_collector = "fee_collector_addr".to_string();
+    let processor = BlockProcessor::new(
+        store.clone(),
+        "JKC_TESTNET".to_string(),
+        min_fee,
+        Some(fee_collector.clone()),
+    );
+
+    let mut create_script = vec![0x6a];
+    create_script.extend_from_slice(b"utxovm");
+    create_script.extend_from_slice(br#"{"op":"create","code_hash":"wasm_token"}"#);
+
+    // Transaction with fee output to WRONG address in scriptpubkey_asm
+    let tx_wrong_collector = ElectrsTx {
+        txid: "5555555555555555555555555555555555555555555555555555555555555555".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 1500,
+            scriptpubkey: hex::encode(&create_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&create_script)),
+        }, ElectrsTxOutput {
+            value: 1000,
+            scriptpubkey: "wrong_fee_script".to_string(),
+            scriptpubkey_asm: Some("OP_DUP OP_HASH160 wrong_addr OP_EQUALVERIFY OP_CHECKSIG".to_string()),
+            scriptpubkey_hex: Some("76a914deadbeef88ac".to_string()),
+        }],
+    };
+
+    let result = processor.process_tx(&tx_wrong_collector, 300).expect("Process should not error");
+    assert!(result.is_none(), "Transaction with wrong fee collector should be rejected");
+
+    // Transaction WITH fee output to correct collector (scriptpubkey_asm contains the collector)
+    let mut create_script2 = vec![0x6a];
+    create_script2.extend_from_slice(b"utxovm");
+    create_script2.extend_from_slice(br#"{"op":"create","code_hash":"wasm_token2"}"#);
+
+    let tx_with_collector = ElectrsTx {
+        txid: "6666666666666666666666666666666666666666666666666666666666666666".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 1500,
+            scriptpubkey: hex::encode(&create_script2),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&create_script2)),
+        }, ElectrsTxOutput {
+            value: 1000,
+            scriptpubkey: "fee_collector_addr".to_string(),
+            scriptpubkey_asm: Some("OP_DUP OP_HASH160 fee_collector_addr OP_EQUALVERIFY OP_CHECKSIG".to_string()),
+            scriptpubkey_hex: Some("76a914deadbeef88ac".to_string()),
+        }],
+    };
+
+    let result = processor.process_tx(&tx_with_collector, 301).expect("Process should succeed");
+    assert!(result.is_some(), "Transaction with fee collector output should be accepted");
 }

@@ -42,3 +42,39 @@ fn test_consensus_quorum_threshold() {
     assert!(consensus.add_attestation(att3_bad));
     assert_eq!(consensus.is_quorum_reached(chain, height, "evil_root_666"), false);
 }
+
+#[test]
+fn test_equivocation_slashing_proof_capture() {
+    let secp = Secp256k1::new();
+    let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+
+    let consensus = ConsensusManager::new(1);
+    consensus.register_validator(&hex::encode(pk.serialize()));
+
+    let chain = "DOGE";
+    let height = 250;
+    let block_hash = "00000000dogehash";
+
+    // Legitimate signature
+    let att_good = consensus
+        .sign_state_root(&sk, chain, height, block_hash, "canonical_state_root")
+        .unwrap();
+    assert!(consensus.add_attestation(att_good));
+
+    // Equivocating signature (same height, different state root)
+    let att_equivocating = consensus
+        .sign_state_root(&sk, chain, height, block_hash, "fork_state_root_evil")
+        .unwrap();
+    assert_eq!(consensus.add_attestation(att_equivocating), false);
+
+    // Verify slashing proof was automatically registered
+    let proofs = consensus.get_slashing_proofs();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].validator_pubkey, hex::encode(pk.serialize()));
+    assert_eq!(proofs[0].first_attestation.state_root, "canonical_state_root");
+    assert_eq!(proofs[0].second_attestation.state_root, "fork_state_root_evil");
+
+    // Cryptographically verify the equivocation proof
+    assert!(utxo_vmd::consensus::covenants::verify_equivocation_proof(&proofs[0]));
+}
+

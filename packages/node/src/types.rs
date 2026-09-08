@@ -62,7 +62,7 @@ pub struct UtxoVmEnvelope {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateAttestation {
     pub chain: String,
     pub block_height: u64,
@@ -87,3 +87,14 @@ pub struct SmtInclusionProof {
     pub proof_path: Vec<SmtProofNode>,
     pub verified: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EquivocationProof {
+    pub chain: String,
+    pub block_height: u64,
+    pub validator_pubkey: String,
+    pub first_attestation: StateAttestation,
+    pub second_attestation: StateAttestation,
+    pub detected_at: i64,
+}
+
