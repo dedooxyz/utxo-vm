@@ -1,0 +1,83 @@
+{
+  "name": "utxo-vm-test-fixtures",
+  "version": "1.0.0",
+  "description": "Public test fixtures for UTXO-VM",
+  "network": "JKC_TESTNET",
+  "wasmHash": "placeholder-wasm-hash",
+  "fixtures": {
+    "deployments": {
+      "nativeVault": {
+        "txid": "6a697245861d25435ca42bec07ffaac581f6022494907dd86926889c598c7a13",
+        "blockHeight": 176000,
+        "type": "NativeVault",
+        "owner": "muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi",
+        "totalLockedSatoshis": 0
+      },
+      "utx721": {
+        "txid": "placeholder-utx721-txid",
+        "blockHeight": 176001,
+        "type": "UTX721",
+        "collectionName": "JKC Test Collection",
+        "tokenId": 1,
+        "metadataUri": "ipfs://test-metadata",
+        "owner": "muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi"
+      },
+      "atomicSwap": {
+        "txid": "placeholder-atomic-swap-txid",
+        "blockHeight": 176002,
+        "type": "AtomicSwap",
+        "maker": "muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi",
+        "offeredTokenId": 1,
+        "demandedSatoshis": 100000000,
+        "hashLock": "placeholder-hash-lock",
+        "timeLock": 144
+      }
+    },
+    "transfers": {
+      "deposit": {
+        "txid": "42901161e8d04b433c1d8f58e810ce97e6a14752b31c38184e1d0349f6c907cf",
+        "blockHeight": 176005,
+        "amount": 50000000
+      }
+    },
+    "batches": {
+      "batch1": {
+        "txid": "a9de1d94b9e1b2089a9a7bc1be1680b98262dd919f9efe7bbba7344967f52a8d",
+        "blockHeight": 176010,
+        "operatorPubkey": "placeholder-operator-pubkey",
+        "stateRoot": "114eaf5f3d2e7c8b4a6f9d2e1c8b5a7f4d3e2c1b0a9f8e7d6c5b4a3f2e1d0c",
+        "prevRoot": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "challenges": {
+      "equivocation": {
+        "txid": "placeholder-challenge-txid",
+        "blockHeight": 176015,
+        "type": "equivocation",
+        "operatorPubkey": "placeholder-operator-pubkey",
+        "signature1": "placeholder-signature-1",
+        "root1": "state-root-1",
+        "signature2": "placeholder-signature-2",
+        "root2": "state-root-2"
+      }
+    }
+  },
+  "wallets": {
+    "operator": {
+      "address": "muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi",
+      "pubkey": "placeholder-operator-pubkey"
+    },
+    "challenger": {
+      "address": "muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi",
+      "pubkey": "placeholder-challenger-pubkey"
+    }
+  },
+  "network": {
+    "name": "JKC_TESTNET",
+    "electrsUrl": "https://jkc-testnet-api.s3na.xyz",
+    "p2pkhPrefix": "0x6f",
+    "p2shPrefix": "0xc4",
+    "wifPrefix": "0xef",
+    "bech32Prefix": "tjkc"
+  }
+}

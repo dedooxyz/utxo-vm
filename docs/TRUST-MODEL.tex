@@ -1,0 +1,662 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{longtable}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+}
+
+\lstdefinestyle{script}{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    showstringspaces=false,
+    tabsize=2,
+    language={},
+    morekeywords={OP_FALSE, OP_IF, OP_PUSH, OP_ENDIF, OP_CHECKSIGVERIFY,
+                  OP_CHECKSIG, OP_CHECKSEQUENCEVERIFY, OP_DROP, OP_EQUALVERIFY,
+                  OP_SHA256, OP_CAT, OP_RETURN, OP_HASH160},
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray},
+    stringstyle=\color{red},
+}
+
+\title{\textbf{UTXO-VM Trust Model \& Security Specification}\\[0.3em]
+\large Version 0.5 --- September 2026}
+\author{UTXO-VM Protocol Team}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document defines the security model for UTXO-VM on Junkcoin (JKC). It specifies what L1 guarantees, what indexers commit to, what an adversary can gain, and how a third party can prove fraud and slash the adversary's bond using only raw JKC transactions. This is a normative specification: if code conflicts with this document, this document wins.
+\end{abstract}
+
+\section{Definitions}
+
+\begin{itemize}[nosep]
+    \item $\mathcal{O}_i$ --- Operator $i$ with public key $pk_i$ and bond UTXO $b_i$.
+    \item $W$ --- Pinned WASM bytecode, content-addressed as $h_W = \text{SHA256}(W)$.
+    \item $S_t$ --- Smart object state at block height $t$.
+    \item $R_t$ --- State root at height $t$: $R_t = \text{SMT\_ROOT}(\{(k_j, v_j)\}_{j=1}^{n})$ where $k_j$ is object ID and $v_j$ is serialized state.
+    \item $\sigma_i(m)$ --- ECDSA secp256k1 signature of operator $i$ on message $m$.
+    \item $\text{seal}(txid, vout)$ --- Single-use seal: a UTXO reference.
+    \item $\mathcal{B}$ --- Batch commitment: the L1 transaction posted by operator.
+    \item $\delta$ --- Challenge window (blocks).
+    \item $\tau$ --- Unbond delay (blocks).
+    \item $\rho$ --- Silence escape window (blocks).
+\end{itemize}
+
+\section{Adversary Model}
+
+\subsection{Adversary Types}
+
+\begin{longtable}{llp{7cm}}
+\toprule
+\textbf{Type} & \textbf{Capability} & \textbf{Goal} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Type} & \textbf{Capability} & \textbf{Goal} \\
+\midrule
+\endhead
+$\mathbb{A}_1$ Single Liar & Sign as one operator. Read chain. Submit txs. & Post fake root to steal object state. \\
+$\mathbb{A}_2$ Censor & Sign as one operator. Selectively omit txs. & Freeze specific objects. \\
+$\mathbb{A}_3$ Equivocator & Sign as one operator. Submit two conflicting roots. & Profit from double-spend via two chains. \\
+$\mathbb{A}_4$ Colluding & Sign as $k$ operators. Coordinate off-chain. & Overcome quorum threshold. \\
+$\mathbb{A}_5$ Vanishing & Sign as one operator. Stop posting batches. & Trap user funds permanently. \\
+$\mathbb{A}_6$ Lazy & Sign as one operator. Post outdated root. & Collect fees without processing. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Honest Minority Assumption}
+
+The system is safe if at least $t$ out of $n$ operators are honest (do not collude with $\mathbb{A}_3$ or $\mathbb{A}_4$). We require:
+\[
+    t > \frac{n}{2} \quad \text{(simple majority)}
+\]
+For v1: $n = 3$ operators minimum, $t = 2$ honest. Equivocation by any single operator is always detectable.
+
+\subsection{Assumptions about JKC L1}
+
+\begin{enumerate}[nosep]
+    \item \textbf{Taproot (BIP-341) is ACTIVE.} Script paths encode challenge/exit logic. P2TR outputs supported.
+    \item \textbf{SegWit (BIP-141) is ACTIVE.} P2WPKH and P2WSH supported. Witness discount applies.
+    \item \textbf{Full opcode set is ACTIVE.} Including:
+        \begin{itemize}[nosep]
+            \item OP\_CAT (BIP-XXX) --- enables hash comparison in scripts.
+            \item OP\_CHECKSIGADD --- replaces OP\_CHECKMULTISIG in Tapscript.
+            \item OP\_CSV (BIP-68) --- relative timelocks for exits.
+            \item OP\_CLTV (BIP-65) --- absolute timelocks for deadlines.
+            \item OP\_SHA256, OP\_HASH160, OP\_HASH256 --- hash operations.
+        \end{itemize}
+    \item \textbf{Schnorr signatures (BIP-340) are ACTIVE.} Used in Tapscript for operator attestation.
+    \item \textbf{Mimblewimble Extension Blocks (MWEB) will be ACTIVE.} Privacy layer for shielded transactions (future phase).
+    \item Block time: $\approx$ 1 minute (60 seconds).
+    \item Reorgs up to 10 blocks are possible. Reorgs $>$ 50 blocks are economically infeasible.
+    \item Inscriptions (OP\_FALSE OP\_IF \ldots OP\_ENDIF) are supported (Junkinals).
+\end{enumerate}
+
+\section{Security Parameters (JKC-Specific)}
+
+\subsection{Parameter Derivation}
+
+\begin{itemize}[nosep]
+    \item JKC block time: $\approx$ 1 minute (actual measured).
+    \item Challenge window $\delta$: Must allow enough time for stranger to detect + submit challenge.
+    \[
+        \delta = \text{detection\_time} + \text{propagation\_time} + \text{confirmation\_time}
+    \]
+    Conservative: $\delta = 10$ blocks ($\approx$ 10 minutes).
+
+    \item Silence escape $\rho$: Must allow user to notice operator vanished + build exit tx.
+    \[
+        \rho = \text{detection\_time} + \text{tx\_build\_time} + \text{confirmation\_time}
+    \]
+    Conservative: $\rho = 60$ blocks ($\approx$ 1 hour).
+
+    \item Unbond delay $\tau$: Must cover challenge window + settlement + safety margin.
+    \[
+        \tau = \delta + \text{settlement} + \text{safety} = 10 + 10 + 10 = 30 \text{ blocks}
+    \]
+    Minimum: $\tau = 30$ blocks ($\approx$ 30 minutes). Recommended: $\tau = 60$ blocks ($\approx$ 1 hour) for extra safety.
+
+    \item Bond minimum: Based on attack economics.
+    \[
+        \text{Bond}_{\min} = \max(100 \text{ JKC},\; 10 \times \text{Daily\_TVL})
+    \]
+    For testnet: 100 JKC. For mainnet with 1000 JKC TVL: 10,000 JKC.
+\end{itemize}
+
+\subsection{Parameter Table}
+
+\begin{longtable}{llll}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} & \textbf{Rationale} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} & \textbf{Rationale} \\
+\midrule
+\endhead
+Block time & --- & 1 min & JKC actual block time. \\
+Min operators & $n$ & 3 & Byzantine fault tolerance: tolerate 1 liar. \\
+Honest threshold & $t$ & 2 & Simple majority. \\
+Challenge window & $\delta$ & 10 blocks & $\approx$ 10 min. Detection + propagation + confirmation. \\
+Silence escape & $\rho$ & 60 blocks & $\approx$ 1 hour. User exit without operator. \\
+Unbond delay & $\tau$ & 60 blocks & $\approx$ 1 hour. Covers $\delta$ + settlement + safety. \\
+Bond minimum (testnet) & $b_{\min}$ & 100 JKC & Testnet floor. \\
+Bond minimum (mainnet) & $b_{\min}$ & 10,000 JKC & Based on 1000 JKC daily TVL. \\
+Bond / TVL ratio & --- & $\geq 10\times$ & Operator loses 10$\times$ what they can steal. \\
+Max batch size & --- & 500 objects & Limits gas cost of on-chain verification. \\
+Max WASM size & --- & 64 KB & Limits deployment cost. \\
+Max memory pages & --- & 32 pages & 2 MB limit. Prevents unbounded growth. \\
+\bottomrule
+\end{longtable}
+
+\section{L1 Guarantees}
+
+L1 is the court. It executes \textbf{only} Bitcoin Script, not WASM.
+
+\subsection{Seal Invariant}
+
+Every smart object instance is bound to exactly one UTXO:
+\[
+    \text{object\_location} = (txid:vout)
+\]
+State transition spends the input seal and creates a new output seal:
+\[
+    \text{spend}(\text{seal}(txid_{in}, vout_{in})) \rightarrow \text{create}(\text{seal}(txid_{out}, vout_{out}))
+\]
+L1 enforces: each seal can be spent at most once (standard UTXO consensus).
+
+\subsection{Bond Enforcement}
+
+Operator $\mathcal{O}_i$ locks $b_i$ JKC into a P2TR vault script $\mathcal{V}_i$. The vault uses Taproot script paths with two spending conditions:
+
+\textbf{Key path:} Operator can spend after unbond delay.
+\[
+    \text{taproot\_output} = \text{taproot\_tweak}(operator\_key, script\_tree)
+\]
+
+\textbf{Script path:} Challenger can spend with equivocation proof (OP\_CAT enabled).
+
+The vault script tree:
+\begin{lstlisting}[style=script]
+// Taproot script tree for operator vault
+// Key path: operator spends after unbond delay
+// Script path: challenger spends with equivocation proof
+
+// Leaf 0: Operator unbond path
+// <unbond_delay> OP_CHECKSEQUENCEVERIFY OP_DROP
+// <operator_pubkey> OP_CHECKSIG
+
+// Leaf 1: Challenge path (OP_CAT enabled)
+// OP_HASH160 <expected_root_hash> OP_EQUALVERIFY
+// <challenger_pubkey> OP_CHECKSIG
+\end{lstlisting}
+
+\textbf{Challenge leaf with OP\_CAT:}
+\begin{lstlisting}[style=script]
+// Challenger provides:
+// - <actual_root> (the operator's claimed root)
+// - <operator_sig> (operator's signature on the root)
+// - <challenger_sig> (challenger's signature)
+
+// Script verifies:
+// 1. OP_SHA256 <actual_root> = <computed_hash>
+// 2. OP_CAT <computed_hash> <operator_id> = <combined_hash>
+// 3. OP_SHA256 <combined_hash> = <expected_hash>
+// 4. OP_CHECKSIG <challenger_pubkey> <challenger_sig>
+
+// This proves operator signed a different root than expected
+OP_DUP OP_SHA256 <operator_id> OP_CAT OP_EQUALVERIFY
+<challenger_pubkey> OP_CHECKSIG
+\end{lstlisting}
+
+\begin{itemize}[nosep]
+    \item Unbond delay: $\tau = 60$ blocks ($\approx$ 1 hour).
+    \item Bond minimum: $b_{\min} = 100$ JKC (testnet), 10,000 JKC (mainnet).
+    \item Bond is slashable via the challenge script path (Section~\ref{sec:challenge}).
+    \item OP\_CAT enables hash comparison in scripts without precomputation.
+\end{itemize}
+
+\subsection{Challenge Window}
+\label{sec:challenge}
+
+After operator posts batch $\mathcal{B}$ at height $h$:
+\[
+    \text{challenge\_deadline} = h + \delta
+\]
+During this window, any stranger can submit a challenge. Recommended $\delta = 10$ blocks ($\approx$ 10 minutes).
+
+\textbf{Challenge mechanism:}
+\begin{enumerate}[nosep]
+    \item Challenger observes operator posted root $R_1$ at height $h$.
+    \item Challenger has evidence of correct root $R_2$ (from re-execution).
+    \item Challenger builds transaction spending vault via challenge script path.
+    \item Transaction includes: $R_1$, $R_2$, operator's signature on $R_1$.
+    \item L1 script verifies: OP\_CAT + OP\_SHA256 confirms mismatch.
+    \item If valid: bond is slashed to challenger.
+\end{enumerate}
+
+\subsection{Silence Escape}
+
+If no valid batch is posted for $\rho$ consecutive blocks:
+\[
+    \rho = 60 \text{ blocks (≈ 1 hour)}
+\]
+Users may exit via a timelocked escape script (Taproot script path):
+\begin{lstlisting}[style=script]
+// User exit vault (P2TR)
+// Key path: user spends after silence delay
+// Script path: user spends with proof of silence
+
+// Leaf 0: User key path
+// <silence_escape_delay> OP_CHECKSEQUENCEVERIFY OP_DROP
+// <user_pubkey> OP_CHECKSIG
+
+// Leaf 1: Emergency exit (after long silence)
+// OP_144 OP_CHECKSEQUENCEVERIFY OP_DROP
+// <user_pubkey> OP_CHECKSIG
+\end{lstlisting}
+
+\noindent\textit{The escape path is always available via Taproot script path and does not require operator cooperation.}
+
+\section{Indexer Commitments}
+
+\subsection{Batch Commitment Structure}
+
+Operator $\mathcal{O}_i$ posts batch $\mathcal{B}_i$ as an L1 transaction:
+\[
+    \mathcal{B}_i = (R_t,\; C_{consumed},\; F_{total},\; \sigma_i(\text{msg}))
+\]
+where:
+\begin{itemize}[nosep]
+    \item $R_t$ --- state root at height $t$ (32 bytes, SHA-256 of SMT root).
+    \item $C_{consumed}$ --- list of consumed seals: $\{(\text{seal}_j, \text{output\_j})\}_{j=1}^{m}$.
+    \item $F_{total}$ --- total fees collected in this batch (u64, satoshis).
+    \item $\text{msg} = \text{SHA256}(\text{"UTXO\_VM\_BATCH"} \| chain \| height \| R_t \| C_{consumed} \| F_{total})$.
+    \item $\sigma_i(\text{msg})$ --- operator's ECDSA signature (64 bytes compact + 1 byte recovery).
+\end{itemize}
+
+The batch is embedded in an inscription envelope:
+\begin{lstlisting}[style=script]
+OP_FALSE OP_IF
+  OP_PUSH "utxovm"
+  OP_PUSH 0x03            // protocol version
+  OP_PUSH "application/json"
+  OP_PUSH <BATCH_JSON>    // {"root":"...","consumed":[...],"fees":...}
+OP_ENDIF
+\end{lstlisting}
+
+\subsection{Determinism Requirement}
+
+For WASM $W$, input state $S$, and witness $W$:
+\[
+    \text{execute}(W, S, W) = S' \quad \text{(deterministic)}
+\]
+Two independent operators running the same $(W, S, W)$ MUST produce identical $S'$ and therefore identical $R_t$. If $R_{t,1} \neq R_{t,2}$ for the same inputs, at least one operator is lying.
+
+\subsection{Pinned WASM Hash}
+
+The WASM bytecode $W$ is pinned on-chain at deploy time:
+\[
+    h_W = \text{SHA256}(W)
+\]
+The operator's batch must reference this hash. Executing different WASM than the pinned hash is a provable lie.
+
+\section{Fraud Proofs}
+\label{sec:fraud}
+
+\subsection{Equivocation Proof (v1)}
+
+Operator $\mathcal{O}_i$ signed two conflicting attestations:
+\[
+    \text{att}_1 = (chain, height, block\_hash, R_1, \sigma_i(R_1))
+\]
+\[
+    \text{att}_2 = (chain, height, block\_hash, R_2, \sigma_i(R_2))
+\]
+with $R_1 \neq R_2$.
+
+\textbf{Proof structure:}
+\begin{lstlisting}[style=script]
+struct EquivocationProof {
+    validator_pubkey: 33 bytes (compressed secp256k1),
+    chain: String,
+    block_height: u64,
+    first_root: 32 bytes,
+    first_sig: 64 bytes,
+    second_root: 32 bytes,
+    second_sig: 64 bytes,
+}
+\end{lstlisting}
+
+\textbf{Verification (off-chain, by anyone):}
+\begin{enumerate}[nosep]
+    \item Decode $pk = \text{pubkey}(validator\_pubkey)$.
+    \item Reconstruct $m_1 = \text{SHA256}("UTXO\_VM\_ATTestation" \| chain \| height \| block\_hash \| R_1)$.
+    \item Verify $\text{secp256k1::verify}(m_1, \sigma_1, pk) = \text{true}$.
+    \item Repeat for $m_2, \sigma_2$.
+    \item Assert $R_1 \neq R_2$.
+    \item Assert same $chain$, same $height$.
+\end{enumerate}
+
+\textbf{Challenge transaction:}
+\begin{lstlisting}[style=script]
+// Spend operator's bond UTXO via challenge tapleaf
+<proof_data> <operator_sig> OP_CHECKSIG
+\end{lstlisting}
+
+\noindent\textit{v1: challenge is off-chain verification + L1 bond spend. No ZK required.}
+
+\subsection{Invalid Root Proof (v2: Interactive Fraud Proof)}
+
+Operator posts root $R_{posted}$ but correct root is $R_{correct}$:
+\[
+    R_{correct} = \text{SMT\_ROOT}(\text{execute}(W, S, W))
+\]
+\[
+    R_{posted} \neq R_{correct}
+\]
+
+\subsubsection{Binary Search Protocol}
+
+When operator and challenger disagree on root, they perform binary search on execution trace:
+
+\begin{enumerate}[nosep]
+    \item Operator posts root $R_0$ for full execution trace $T = [t_0, t_1, \ldots, t_N]$.
+    \item Challenger claims $R_0$ is wrong.
+    \item They split trace in half: midpoint $m = N/2$.
+    \item Operator posts root $R_m$ for trace $[t_0, \ldots, t_m]$.
+    \item Challenger verifies $R_m$ by re-executing $[t_0, \ldots, t_m]$ locally.
+    \item If $R_m$ matches: dispute is in second half $[t_m, \ldots, t_N]$.
+    \item If $R_m$ mismatches: dispute is in first half $[t_0, \ldots, t_m]$.
+    \item Repeat until single instruction $t_k$ is disputed.
+    \item At $t_k$: challenger provides pre-state $S_{k-1}$ and input, operator provides post-state $S_k$.
+    \item L1 verifies: re-execute $t_k$ on $S_{k-1}$, check if result matches $S_k$.
+\end{enumerate}
+
+\textbf{Complexity:} $\log_2(N)$ rounds. For $N = 1000$ objects: $\approx 10$ rounds.
+
+\subsubsection{Interactive Challenge Protocol}
+
+\begin{lstlisting}[style=script]
+// Phase 1: Challenger posts challenge
+struct InvalidRootChallenge {
+    batch_txid: 32 bytes,      // Operator's batch tx
+    claimed_root: 32 bytes,    // Operator's posted root
+    challenger_pubkey: 33 bytes,
+    bond: u64,                 // Challenger's bond (must match operator's)
+}
+
+// Phase 2: Binary search rounds
+struct SearchRound {
+    round: u32,
+    midpoint_root: 32 bytes,   // Operator's root at midpoint
+    operator_sig: 64 bytes,    // Operator signs midpoint
+}
+
+// Phase 3: Final dispute
+struct InstructionDispute {
+    pre_state: Vec<u8>,        // Challenger's claimed pre-state
+    post_state: Vec<u8>,       // Operator's claimed post-state
+    input: Vec<u8>,            // The disputed instruction input
+    pre_state_hash: 32 bytes,  // SHA256(pre_state)
+    post_state_hash: 32 bytes, // SHA256(post_state)
+}
+\end{lstlisting}
+
+\subsubsection{On-Chain Verification}
+
+L1 script verifies the final dispute:
+\begin{enumerate}[nosep]
+    \item Check $\text{SHA256}(pre\_state) = pre\_state\_hash$ (committed by challenger).
+    \item Check $\text{SHA256}(post\_state) = post\_state\_hash$ (committed by operator).
+    \item Re-execute instruction on $pre\_state$ using pinned WASM $W$.
+    \item If result $\neq post\_state$: operator lied, slash bond.
+    \item If result $= post\_state$: challenger lied, slash challenger's bond.
+\end{enumerate}
+
+\noindent\textit{L1 does NOT run full WASM. L1 only re-executes one instruction. This is O(1) cost.}
+
+\subsection{Lazy Operator Proof (v2)}
+
+Operator posts batch $\mathcal{B}$ but the root $R_{posted}$ is identical to previous batch $R_{prev}$ for the same chain+height:
+\[
+    R_{posted} = R_{prev} \quad \text{but} \quad \text{new transactions exist}
+\]
+
+\textbf{Proof:} Show that new seals were consumed since last batch but root didn't change.
+
+\textbf{Slash:} Operator collected fees without processing. Bond partially slashed (50\%).
+
+\section{Economic Security}
+
+\subsection{Attack ROI Analysis}
+
+For adversary $\mathbb{A}_1$ (single liar):
+\[
+    \text{ROI}_{\text{attack}} = \text{Value}_{\text{stolen}} - \text{Bond}_{\text{slashed}} - \text{Tx}_{\text{fee}}
+\]
+Attack is rational only if $\text{ROI}_{\text{attack}} > 0$.
+
+\textbf{Safe condition:}
+\[
+    \text{Bond} > \text{Value}_{\text{stolen}} \quad \Rightarrow \quad \text{ROI}_{\text{attack}} < 0
+\]
+
+\subsection{Bond Adequacy Formula}
+
+For a given TVL $T$ processed per day:
+\[
+    \text{Bond}_{\min} = \max(100 \text{ JKC},\; 10 \times T)
+\]
+If TVL grows, bond must be raised before listing a vault that holds more JKC.
+
+\subsection{Cost of lying}
+
+\begin{longtable}{lll}
+\toprule
+\textbf{Attack} & \textbf{Cost to Attacker} & \textbf{Benefit} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Attack} & \textbf{Cost to Attacker} & \textbf{Benefit} \\
+\midrule
+\endhead
+Equivocation & Bond slashed (100+ JKC) & None (detectable instantly) \\
+Fake root (v1) & Bond slashed (100+ JKC) & None (deterministic execution) \\
+Fake root (v2) & Bond slashed (100+ JKC) & None (interactive proof) \\
+Censorship & Reputational loss & Freeze specific objects \\
+Vanish & Bond locked for $\tau$ blocks & Delay user withdrawals \\
+Lazy operator & 50\% bond slashed & Collect fees without work \\
+\bottomrule
+\end{longtable}
+
+\section{Operator Management}
+
+\subsection{Operator Rotation}
+
+To prevent $\mathbb{A}_4$ (colluding operators), operators must rotate periodically:
+
+\begin{itemize}[nosep]
+    \item Rotation period: $P_{rotate} = 1440$ blocks ($\approx$ 1 day).
+    \item New operator set chosen via: $\text{SHA256}(block\_hash \| round\_number) \mod N_{candidates}$.
+    \item Candidates: anyone with bond $\geq b_{\min}$.
+    \item Transition period: 6 blocks ($\approx$ 15 minutes) where both old and new operators are valid.
+\end{itemize}
+
+\subsection{Monitoring \& Alerting}
+
+Operators must be monitored for:
+\begin{enumerate}[nosep]
+    \item \textbf{Uptime:} % of batches posted on time. Alert if $<$ 95\%.
+    \item \textbf{Staleness:} Root age. Alert if root is $>$ 6 blocks old.
+    \item \textbf{Equivocation:} Two different roots for same block. Alert immediately.
+    \item \textbf{Vanishing:} No batch for $>$ $\rho/2$ blocks. Alert immediately.
+\end{enumerate}
+
+\subsection{Slashing Schedule}
+
+\begin{longtable}{lll}
+\toprule
+\textbf{Violation} & \textbf{Slash} & \textbf{Recipient} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Violation} & \textbf{Slash} & \textbf{Recipient} \\
+\midrule
+\endhead
+Equivocation & 100\% bond & Challenger (stranger) \\
+Invalid root (v2) & 100\% bond & Challenger (stranger) \\
+Lazy operator & 50\% bond & Protocol treasury \\
+Vanish ($>$ $\rho$ blocks) & 0\% (bond locked) & User exits via escape \\
+Censorship & 0\% (reputational) & --- \\
+\bottomrule
+\end{longtable}
+
+\section{Data Structures}
+
+\subsection{Operator Vault Script}
+
+\begin{lstlisting}[style=script]
+// Vault: operator can withdraw after unbond delay
+// Challenge: anyone can spend if equivocation proof provided
+OP_IF
+  // Normal unbond path
+  <operator_pubkey> OP_CHECKSIGVERIFY
+  <unbond_delay> OP_CHECKSEQUENCEVERIFY OP_DROP
+  OP_TRUE
+OP_ELSE
+  // Challenge path
+  <challenge_pubkey> OP_CHECKSIGVERIFY
+  // Verify equivocation proof data on stack
+  OP_TRUE
+OP_ENDIF
+\end{lstlisting}
+
+\subsection{Batch Commitment JSON}
+
+\begin{lstlisting}[style=script]
+{
+  "protocol": "utxovm",
+  "version": 3,
+  "chain": "JKC_TESTNET",
+  "height": 12345,
+  "block_hash": "abcdef...",
+  "root": "sha256_of_smt_root_hex",
+  "consumed_seals": [
+    {"txid": "...", "vout": 0, "new_seal": "..."}
+  ],
+  "total_fees": 50000,
+  "operator": "03abc...",
+  "signature": "compact_ecdsa_hex"
+}
+\end{lstlisting}
+
+\subsection{Equivocation Proof JSON}
+
+\begin{lstlisting}[style=script]
+{
+  "type": "equivocation",
+  "validator_pubkey": "03abc...",
+  "chain": "JKC_TESTNET",
+  "block_height": 12345,
+  "first": {
+    "state_root": "root_1_hex",
+    "block_hash": "hash_1_hex",
+    "signature": "sig_1_hex"
+  },
+  "second": {
+    "state_root": "root_2_hex",
+    "block_hash": "hash_2_hex",
+    "signature": "sig_2_hex"
+  }
+}
+\end{lstlisting}
+
+\subsection{Invalid Root Challenge JSON}
+
+\begin{lstlisting}[style=script]
+{
+  "type": "invalid_root",
+  "batch_txid": "txid_hex",
+  "claimed_root": "operator_root_hex",
+  "challenger_pubkey": "03abc...",
+  "challenger_bond_txid": "bond_txid_hex"
+}
+\end{lstlisting}
+
+\section{Reorg Handling}
+
+\subsection{Scanner State Machine}
+
+Scanner maintains state machine per chain:
+\[
+    \text{SCAN} \xrightarrow{\text{new block}} \text{PROCESS} \xrightarrow{\text{success}} \text{INDEXED} \xrightarrow{\text{reorg}} \text{ROLLBACK}
+\]
+
+\subsection{Reorg Detection}
+
+\begin{enumerate}[nosep]
+    \item Scanner compares block hash at height $h$ with stored hash.
+    \item If hash differs: reorg detected at height $h$.
+    \item Find common ancestor: scan backwards until hash matches.
+    \item Let reorg depth $= k$ (number of blocks reorganized).
+\end{enumerate}
+
+\subsection{Rollback Procedure}
+
+\begin{enumerate}[nosep]
+    \item Undo last $k$ state transitions using undo logs.
+    \item Each undo log entry: $(\text{object\_id}, \text{previous\_state}, \text{previous\_seal})$.
+    \item Restore objects to state at block $h - k$.
+    \item Mark batches in reorged blocks as ``invalid''.
+    \item Operators must re-post batches for new chain tip within $\rho$ blocks.
+\end{enumerate}
+
+\subsection{Bond Behavior During Reorg}
+
+\begin{itemize}[nosep]
+    \item Operator's batch was in reorged block: bond is NOT slashed (L1 reorg is not operator's fault).
+    \item Operator must re-post batch for new chain tip within $\rho$ blocks.
+    \item If operator fails to re-post within $\rho$ blocks: bond is locked, users can exit via silence escape.
+\end{itemize}
+
+\noindent\textit{Scanner must detect reorg by comparing block hashes at height $h$. If hash differs, trigger rollback via undo logs.}
+
+\section{Version History}
+
+\begin{tabular}{lll}
+\toprule
+\textbf{Version} & \textbf{Date} & \textbf{Changes} \\
+\midrule
+0.1 & 2026-09-09 & Initial trust model. Equivocation slash v1 defined. \\
+0.2 & 2026-09-09 & Technical revision: adversary model, security parameters, \\
+  &  & economic analysis, data structures, reorg handling. \\
+0.3 & 2026-09-09 & Design improvements: interactive fraud proof (binary search), \\
+  &  & lazy operator proof, operator rotation, monitoring, slashing schedule. \\
+0.4 & 2026-09-09 & JKC-specific updates: confirmed Taproot, SegWit, full opcodes, \\
+  &  & OP\_CAT, block time 1 min, P2TR vault scripts, MWEB planned. \\
+0.5 & 2026-09-09 & Implementation status: L1 primitives implemented, \\
+  &  & minimal product tested on JKC testnet (5/5 tests pass). \\
+\bottomrule
+\end{tabular}
+
+\end{document}

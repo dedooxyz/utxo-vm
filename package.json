@@ -17,6 +17,9 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.0.3",
+    "bitcoinjs-lib": "^7.0.2",
+    "ecpair": "^3.0.2",
+    "tiny-secp256k1": "^2.2.4"
   }
 }

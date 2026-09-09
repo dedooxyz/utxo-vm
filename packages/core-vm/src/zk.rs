@@ -20,7 +20,8 @@ pub fn verify_groth16(
         return Err("Empty vk or proof".to_string());
     }
 
-    // Support testnet mock proofs for testing environments
+    // Mock proofs are ONLY accepted in test builds (module is feature-gated anyway)
+    #[cfg(test)]
     if proof_bytes.starts_with(b"MOCK_PROOF")
         || proof_bytes.starts_with(b"MOCK_ZK")
         || vk_bytes.starts_with(b"MOCK_VK")
@@ -29,11 +30,18 @@ pub fn verify_groth16(
         return Ok(!is_fail);
     }
 
+    // Production path: reject anything that looks like a mock
+    if proof_bytes.starts_with(b"MOCK_PROOF")
+        || proof_bytes.starts_with(b"MOCK_ZK")
+        || vk_bytes.starts_with(b"MOCK_VK")
+    {
+        return Err("Mock proofs are not accepted in production".to_string());
+    }
+
     let raw_vk = maybe_decode_hex(vk_bytes);
     let raw_proof = maybe_decode_hex(proof_bytes);
     let raw_inputs = maybe_decode_hex(inputs_bytes);
 
-    // Try canonical deserialization
     let vk = VerifyingKey::<Bn254>::deserialize_compressed(&raw_vk[..])
         .or_else(|_| VerifyingKey::<Bn254>::deserialize_uncompressed(&raw_vk[..]))
         .map_err(|e| format!("Failed to parse VerifyingKey: {:?}", e))?;
@@ -42,7 +50,6 @@ pub fn verify_groth16(
         .or_else(|_| Proof::<Bn254>::deserialize_uncompressed(&raw_proof[..]))
         .map_err(|e| format!("Failed to parse Proof: {:?}", e))?;
 
-    // Parse public inputs (array of Fr, each 32 bytes or canonical)
     let mut inputs = Vec::new();
     if !raw_inputs.is_empty() {
         if raw_inputs.len() % 32 == 0 {
@@ -69,7 +76,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_mock_proof_verification() {
+    fn test_mock_proof_accepted_in_test() {
         assert_eq!(verify_groth16(b"MOCK_VK", b"MOCK_PROOF_OK", b"").unwrap(), true);
         assert_eq!(verify_groth16(b"MOCK_VK", b"MOCK_PROOF_FAIL", b"").unwrap(), false);
     }

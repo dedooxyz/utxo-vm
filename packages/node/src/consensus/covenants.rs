@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use crate::types::EquivocationProof;
 
-pub const OP_CAT: u8 = 0x7e;
+// Standard opcodes — always available
 pub const OP_SHA256: u8 = 0xa8;
 pub const OP_DROP: u8 = 0x75;
 pub const OP_EQUALVERIFY: u8 = 0x88;
@@ -10,6 +10,11 @@ pub const OP_CHECKSIG: u8 = 0xac;
 pub const OP_CHECKSIGVERIFY: u8 = 0xad;
 pub const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
 pub const OP_RETURN: u8 = 0x6a;
+
+// OP_CAT — only available when experimental-scripts feature is enabled
+// JKC does not yet have OP_CAT activated. Do not use in production.
+#[cfg(feature = "experimental-scripts")]
+pub const OP_CAT: u8 = 0x7e;
 
 /// Generate on-chain Taproot Staking Covenant Script for Junkcoin L1:
 /// `<lock_blocks> OP_CHECKSEQUENCEVERIFY OP_DROP <validator_pubkey> OP_CHECKSIG`
@@ -94,6 +99,9 @@ pub fn build_slashing_script(validator_pubkey_hex: &str, whistleblower_pubkey_he
 /// This is the primitive for building more complex covenant logic.
 ///
 /// Script: <hash1> <hash2> OP_CAT <expected_hash> OP_EQUALVERIFY
+///
+/// WARNING: JKC does not yet have OP_CAT activated. Requires `experimental-scripts` feature.
+#[cfg(feature = "experimental-scripts")]
 pub fn build_cat_equality_covenant(hash1: &[u8], hash2: &[u8], expected_concat: &[u8]) -> Result<Vec<u8>> {
     let mut script = Vec::new();
 
@@ -122,6 +130,9 @@ pub fn build_cat_equality_covenant(hash1: &[u8], hash2: &[u8], expected_concat: 
 /// This is used for state root comparison in equivocation proofs.
 ///
 /// Script: <sig1> <sig2> <msg1> <msg2> OP_CAT OP_SHA256 <expected_state_root> OP_EQUALVERIFY OP_CHECKSIG
+///
+/// WARNING: JKC does not yet have OP_CAT activated. Requires `experimental-scripts` feature.
+#[cfg(feature = "experimental-scripts")]
 pub fn build_state_root_comparison_covenant(validator_pubkey_hex: &str) -> Result<Vec<u8>> {
     let val_pk = hex::decode(validator_pubkey_hex)
         .map_err(|e| anyhow!("Invalid validator pubkey hex: {}", e))?;
@@ -235,6 +246,7 @@ mod tests {
         assert!(script.contains(&OP_CHECKSIG));
     }
 
+    #[cfg(feature = "experimental-scripts")]
     #[test]
     fn test_build_cat_equality_covenant() {
         let hash1 = vec![0x01; 32];
@@ -250,6 +262,7 @@ mod tests {
         assert!(script.contains(&OP_EQUALVERIFY));
     }
 
+    #[cfg(feature = "experimental-scripts")]
     #[test]
     fn test_build_state_root_comparison_covenant() {
         let dummy_pk = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -262,6 +275,7 @@ mod tests {
         assert!(script.contains(&OP_CHECKSIGVERIFY));
     }
 
+    #[cfg(feature = "experimental-scripts")]
     #[test]
     fn test_op_cat_constant() {
         assert_eq!(OP_CAT, 0x7e);
