@@ -3,7 +3,7 @@ use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tracing;
 
 use super::verifier::{CrossChainProof, CrossChainVerifier};
@@ -79,8 +79,9 @@ pub struct BridgeManager {
     store: StateStore,
     transfers: Arc<RwLock<HashMap<String, BridgeTransfer>>>,
     events: Arc<RwLock<Vec<BridgeEvent>>>,
-    /// Set of already-minted source object IDs (replay protection)
     minted_objects: Arc<RwLock<HashMap<String, String>>>,
+    /// Per-transfer_id mutex to serialize concurrent mint_from_proof retries
+    transfer_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl BridgeManager {
@@ -91,6 +92,7 @@ impl BridgeManager {
             transfers: Arc::new(RwLock::new(HashMap::new())),
             events: Arc::new(RwLock::new(Vec::new())),
             minted_objects: Arc::new(RwLock::new(HashMap::new())),
+            transfer_locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -216,6 +218,22 @@ impl BridgeManager {
         transfer_id: &str,
         proof: &CrossChainProof,
     ) -> Result<BridgeTransfer> {
+        // Serialize concurrent calls for the same transfer_id to prevent
+        // duplicate mints from concurrent retries.
+        let lock = {
+            let mut locks = self
+                .transfer_locks
+                .write()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            locks
+                .entry(transfer_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Transfer lock poisoned: {}", e))?;
+
         // F1.2 + P0-fu.1: Atomic check-and-insert in redb.
         // redb serializes write transactions per-table, so two concurrent
         // calls for the same object_id cannot both succeed.

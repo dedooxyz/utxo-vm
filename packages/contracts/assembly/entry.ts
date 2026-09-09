@@ -263,6 +263,11 @@ export function get_state(out_ptr: usize): i32 {
   return len;
 }
 
+export function get_state_size(): i32 {
+  let buf = String.UTF8.encode(globalStateJson);
+  return buf.byteLength;
+}
+
 export function restore_state(state_ptr: usize, state_len: i32): i32 {
   if (state_len <= 0) return 0;
   globalStateJson = String.UTF8.decodeUnsafe(state_ptr, state_len, true);

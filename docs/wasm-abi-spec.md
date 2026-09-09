@@ -32,10 +32,12 @@ export function restore_state(state_ptr: usize, state_len: i32): i32;
 2. Host writes init_args to `args_ptr`
 3. Host calls `init(args_ptr, init_args.len())`
 4. Host calls `deallocate(args_ptr, init_args.len())`
-5. Host calls `allocate(65536)` → gets `state_out_ptr` (64 KiB scratch buffer)
-6. Host calls `get_state(state_out_ptr)` → returns written length
-7. Host reads `len` bytes from `state_out_ptr`
-8. Host calls `deallocate(state_out_ptr, 65536)`
+5. Host calls `get_state_size()` → returns state byte length (0 if unavailable)
+6. Host calls `allocate(buf_size)` → gets `state_out_ptr` (buf_size = actual size, capped at 1MB, fallback 64KB)
+7. Host calls `get_state(state_out_ptr)` → returns written length
+8. Host checks `len <= buf_size` — rejects if overflow
+9. Host reads `len` bytes from `state_out_ptr`
+10. Host calls `deallocate(state_out_ptr, buf_size)`
 
 ### execute()
 
@@ -50,10 +52,12 @@ export function restore_state(state_ptr: usize, state_len: i32): i32;
 9. Host calls `call(method_ptr, args_ptr, args.len())`
 10. Host calls `deallocate(method_ptr, ...)`
 11. Host calls `deallocate(args_ptr, ...)`
-12. Host calls `allocate(65536)` → gets `state_out_ptr`
-13. Host calls `get_state(state_out_ptr)` → returns written length
-14. Host reads `len` bytes from `state_out_ptr`
-15. Host calls `deallocate(state_out_ptr, 65536)`
+12. Host calls `get_state_size()` → returns state byte length
+13. Host calls `allocate(buf_size)` → gets `state_out_ptr`
+14. Host calls `get_state(state_out_ptr)` → returns written length
+15. Host checks `len <= buf_size` — rejects if overflow
+16. Host reads `len` bytes from `state_out_ptr`
+17. Host calls `deallocate(state_out_ptr, buf_size)`
 
 ## 4. Host Imports (`env`)
 

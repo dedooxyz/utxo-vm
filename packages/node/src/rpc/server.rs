@@ -168,6 +168,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/consensus/slashing-proofs", get(get_slashing_proofs))
         .route("/api/v1/bridge/lock", post(lock_assets))
         .route("/api/v1/bridge/mint", post(mint_from_proof))
+        .route("/api/v1/bridge/cancel", post(cancel_transfer))
         .route("/api/v1/bridge/transfer/:id", get(get_transfer))
         .route("/api/v1/bridge/transfers", get(get_all_transfers))
         .route("/api/v1/relay/create", post(create_relay))
@@ -492,6 +493,38 @@ async fn lock_assets(
 struct MintRequest {
     transfer_id: String,
     proof: CrossChainProof,
+}
+
+#[derive(Deserialize)]
+struct CancelRequest {
+    transfer_id: String,
+    caller: String,
+}
+
+async fn cancel_transfer(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CancelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_bridge_auth(&headers, &state.bridge_api_key)?;
+
+    let transfer = state
+        .bridge
+        .cancel_transfer(&req.transfer_id, &req.caller)
+        .map_err(|e| {
+            if e.to_string().contains("not owner") {
+                (StatusCode::FORBIDDEN, e.to_string())
+            } else if e.to_string().contains("timeout") {
+                (StatusCode::CONFLICT, e.to_string())
+            } else {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            }
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "cancelled",
+        "transfer": transfer
+    })))
 }
 
 async fn mint_from_proof(

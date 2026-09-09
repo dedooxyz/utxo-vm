@@ -345,10 +345,18 @@ impl VmRuntime {
 
         let mut state_data = Vec::new();
         if let Ok(get_state_fn) = instance.get_typed_func::<i32, i32>(&mut store, "get_state") {
-            // P2: Allocate scratch buffer for get_state output
+            // P2+P3: Query actual state size, allocate exact buffer, overflow check
+            const MAX_STATE_SIZE: i32 = 1024 * 1024; // 1MB safety cap
+            let buf_size = if let Ok(size_fn) = instance.get_typed_func::<(), i32>(&mut store, "get_state_size") {
+                let actual = size_fn.call(&mut store,()).unwrap_or(0);
+                if actual > 0 { actual.min(MAX_STATE_SIZE) } else { Self::GET_STATE_BUF_SIZE as i32 }
+            } else {
+                Self::GET_STATE_BUF_SIZE as i32
+            };
+
             let state_out_ptr = if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut store, "allocate") {
                 alloc_fn
-                    .call(&mut store, Self::GET_STATE_BUF_SIZE as i32)
+                    .call(&mut store, buf_size)
                     .map_err(|e| format!("allocate() for get_state error: {}", e))?
             } else {
                 0x2000
@@ -357,16 +365,23 @@ impl VmRuntime {
             let len = get_state_fn
                 .call(&mut store, state_out_ptr)
                 .unwrap_or(0);
-            if len > 0 {
+            // P3: Overflow guard — reject if state exceeds allocated buffer
+            if len > 0 && len <= buf_size {
                 state_data.resize(len as usize, 0);
                 memory
                     .read(&store, state_out_ptr as usize, &mut state_data)
                     .map_err(|e| format!("Memory read error: {}", e))?;
+            } else if len > buf_size {
+                return Err(format!(
+                    "State overflow: guest returned {} bytes but only {} allocated. \
+                     Contract state exceeds maximum allowed size.",
+                    len, buf_size
+                ));
             }
 
             // Deallocate get_state buffer
             if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "deallocate") {
-                let _ = dealloc_fn.call(&mut store, (state_out_ptr, Self::GET_STATE_BUF_SIZE as i32));
+                let _ = dealloc_fn.call(&mut store, (state_out_ptr, buf_size));
             }
         }
 
@@ -489,20 +504,34 @@ impl VmRuntime {
             deallocate_guest(&mut store, args_ptr, args.len() as i32);
         }
 
-        // P2: Read state via allocated buffer
+        // P2+P3: Read state via allocated buffer with overflow protection
         let mut updated_state_data = state.state_data.clone();
         if let Ok(get_state_fn) = instance.get_typed_func::<i32, i32>(&mut store, "get_state") {
-            let state_out_ptr = allocate_guest(&mut store, Self::GET_STATE_BUF_SIZE as i32);
+            const MAX_STATE_SIZE: i32 = 1024 * 1024; // 1MB safety cap
+            let buf_size = if let Ok(size_fn) = instance.get_typed_func::<(), i32>(&mut store, "get_state_size") {
+                let actual = size_fn.call(&mut store,()).unwrap_or(0);
+                if actual > 0 { actual.min(MAX_STATE_SIZE) } else { Self::GET_STATE_BUF_SIZE as i32 }
+            } else {
+                Self::GET_STATE_BUF_SIZE as i32
+            };
+
+            let state_out_ptr = allocate_guest(&mut store, buf_size);
             let len = get_state_fn
                 .call(&mut store, state_out_ptr)
                 .unwrap_or(0);
-            if len > 0 {
+            // P3: Overflow guard
+            if len > 0 && len <= buf_size {
                 updated_state_data.resize(len as usize, 0);
                 memory
                     .read(&store, state_out_ptr as usize, &mut updated_state_data)
                     .map_err(|e| format!("Memory read error: {}", e))?;
+            } else if len > buf_size {
+                return Err(format!(
+                    "State overflow: guest returned {} bytes but only {} allocated.",
+                    len, buf_size
+                ));
             }
-            deallocate_guest(&mut store, state_out_ptr, Self::GET_STATE_BUF_SIZE as i32);
+            deallocate_guest(&mut store, state_out_ptr, buf_size);
         }
 
         let fuel_left = store.get_fuel().unwrap_or(0);
