@@ -312,7 +312,7 @@ fn test_bad_wasm_hash_rejected() {
     "#;
 
     let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
-    let correct_hash = VmRuntime::calculate_code_hash(&wasm_bytes);
+    let _correct_hash = VmRuntime::calculate_code_hash(&wasm_bytes);
 
     // Create a state with a WRONG code_hash
     let state_wrong_hash = SmartObjectState {

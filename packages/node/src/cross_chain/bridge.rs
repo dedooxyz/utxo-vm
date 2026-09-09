@@ -71,6 +71,8 @@ pub struct BridgeManager {
     store: StateStore,
     transfers: Arc<RwLock<HashMap<String, BridgeTransfer>>>,
     events: Arc<RwLock<Vec<BridgeEvent>>>,
+    /// Set of already-minted source object IDs (replay protection)
+    minted_objects: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl BridgeManager {
@@ -80,10 +82,12 @@ impl BridgeManager {
             store,
             transfers: Arc::new(RwLock::new(HashMap::new())),
             events: Arc::new(RwLock::new(Vec::new())),
+            minted_objects: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Initiate a cross-chain transfer (Lock on source chain)
+    /// Initiate a cross-chain transfer (Lock on source chain).
+    /// F1.1: Marks source object as locked so it cannot be re-used.
     pub fn lock_assets(
         &self,
         source_chain: &str,
@@ -97,6 +101,15 @@ impl BridgeManager {
             .get_object(object_id)
             .context("Object not found")?
             .ok_or_else(|| anyhow::anyhow!("Object not found: {}", object_id))?;
+
+        // F1.1: Check that object is not already locked
+        if let Some(locked_owner) = obj.owner.strip_prefix("bridge_locked:") {
+            return Err(anyhow::anyhow!(
+                "Object {} is already locked for bridge transfer (locked_by: {}). Cannot re-lock.",
+                object_id,
+                locked_owner,
+            ));
+        }
 
         // Create transfer record
         let transfer_id = format!(
@@ -114,12 +127,20 @@ impl BridgeManager {
             dest_chain: dest_chain.to_string(),
             dest_owner: dest_owner.to_string(),
             amount: obj.satoshis,
-            status: BridgeStatus::Pending,
+            status: BridgeStatus::Locked,
             created_at: chrono::Utc::now().timestamp(),
             completed_at: None,
         };
 
-        // Store transfer
+        // F1.1: Lock the source object by rewriting owner prefix
+        let mut locked_obj = obj.clone();
+        locked_obj.owner = format!("bridge_locked:{}", obj.owner);
+        self.store.save_object(&locked_obj)?;
+
+        // Persist transfer to store
+        self.store.save_bridge_transfer(&transfer)?;
+
+        // Also keep in-memory cache for fast reads
         self.transfers
             .write()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
@@ -143,12 +164,32 @@ impl BridgeManager {
         Ok(transfer)
     }
 
-    /// Verify and complete cross-chain transfer (Mint on destination chain)
+    /// Verify and complete cross-chain transfer (Mint on destination chain).
+    /// F1.2: Checks replay — same source object cannot be minted twice.
     pub fn mint_from_proof(
         &self,
         transfer_id: &str,
         proof: &CrossChainProof,
     ) -> Result<BridgeTransfer> {
+        // F1.2: Replay guard — check if this source object was already minted
+        {
+            let minted = self
+                .minted_objects
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            if let Some(existing_transfer) = minted.get(&proof.object_id) {
+                if existing_transfer != transfer_id {
+                    return Err(anyhow::anyhow!(
+                        "Replay rejected: source object '{}' was already minted via transfer '{}'. \
+                         Cannot mint again in transfer '{}'.",
+                        proof.object_id,
+                        existing_transfer,
+                        transfer_id,
+                    ));
+                }
+            }
+        }
+
         // Get transfer record
         let mut transfer = {
             let transfers = self
@@ -160,6 +201,15 @@ impl BridgeManager {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("Transfer not found: {}", transfer_id))?
         };
+
+        // F1.2: Reject if already completed or minted
+        if transfer.status == BridgeStatus::Completed || transfer.status == BridgeStatus::Minted {
+            return Err(anyhow::anyhow!(
+                "Transfer '{}' is already in status {:?}. Cannot re-mint.",
+                transfer_id,
+                transfer.status,
+            ));
+        }
 
         // Verify the cross-chain proof
         let verification = self.verifier.verify_proof(proof);
@@ -196,7 +246,8 @@ impl BridgeManager {
         // Create minted object on destination chain
         let minted_obj = SmartObjectRecord {
             object_id: format!("bridge_{}_{}", transfer_id, chrono::Utc::now().timestamp()),
-            code_hash: proof.object_data
+            code_hash: proof
+                .object_data
                 .get("code_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or("bridge_native")
@@ -215,6 +266,12 @@ impl BridgeManager {
         transfer.status = BridgeStatus::Minted;
         transfer.completed_at = Some(chrono::Utc::now().timestamp());
         self.update_transfer(&transfer)?;
+
+        // F1.2: Record this source object as minted
+        self.minted_objects
+            .write()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+            .insert(proof.object_id.clone(), transfer_id.to_string());
 
         // Emit minted event
         self.emit_event(BridgeEvent {
@@ -235,11 +292,18 @@ impl BridgeManager {
 
     /// Get transfer status
     pub fn get_transfer(&self, transfer_id: &str) -> Result<Option<BridgeTransfer>> {
-        let transfers = self
-            .transfers
-            .read()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        Ok(transfers.get(transfer_id).cloned())
+        // Try in-memory first
+        {
+            let transfers = self
+                .transfers
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            if let Some(t) = transfers.get(transfer_id) {
+                return Ok(Some(t.clone()));
+            }
+        }
+        // Fall back to store
+        self.store.get_bridge_transfer(transfer_id)
     }
 
     /// Get all transfers
@@ -264,13 +328,13 @@ impl BridgeManager {
             .collect())
     }
 
-    /// Update transfer record
+    /// Update transfer record (memory + store)
     fn update_transfer(&self, transfer: &BridgeTransfer) -> Result<()> {
-        let mut transfers = self
-            .transfers
+        self.transfers
             .write()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        transfers.insert(transfer.id.clone(), transfer.clone());
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+            .insert(transfer.id.clone(), transfer.clone());
+        self.store.save_bridge_transfer(transfer)?;
         Ok(())
     }
 
@@ -316,9 +380,27 @@ mod tests {
             .lock_assets("JKC", "obj_test", "DOGE", "doge_owner_addr")
             .unwrap();
 
-        assert_eq!(transfer.status, BridgeStatus::Pending);
+        assert_eq!(transfer.status, BridgeStatus::Locked);
         assert_eq!(transfer.source_chain, "JKC");
         assert_eq!(transfer.dest_chain, "DOGE");
+
+        // F1.1: Source object must now be locked
+        let locked_obj = store.get_object("obj_test").unwrap().unwrap();
+        assert!(
+            locked_obj.owner.starts_with("bridge_locked:"),
+            "Source object owner should start with 'bridge_locked:', got: {}",
+            locked_obj.owner
+        );
+
+        // F1.1: Re-locking must fail
+        let relock_result = bridge.lock_assets("JKC", "obj_test", "LTC", "ltc_owner");
+        assert!(relock_result.is_err(), "Re-locking a locked object must fail");
+        let err_msg = relock_result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already locked"),
+            "Error should say 'already locked', got: {}",
+            err_msg
+        );
 
         // Get transfer
         let got = bridge.get_transfer(&transfer.id).unwrap().unwrap();

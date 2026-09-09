@@ -31,6 +31,50 @@ pub struct AppState {
     pub relay: Arc<StateRelay>,
     /// Per-IP rate limiter built from rate_limit_rps CLI arg
     pub rate_limiter: Arc<RateLimiter>,
+    /// API key for bridge write endpoints (lock/mint). If None, bridge writes are disabled.
+    pub bridge_api_key: Option<String>,
+}
+
+/// F1.4: Verify bridge API key from Authorization header.
+/// Returns Ok(()) if valid, Err with status code if missing/invalid.
+fn verify_bridge_auth(
+    headers: &axum::http::HeaderMap,
+    expected_key: &Option<String>,
+) -> Result<(), (StatusCode, String)> {
+    match expected_key {
+        None => Err((
+            StatusCode::FORBIDDEN,
+            "Bridge write endpoints are disabled (no API key configured)".to_string(),
+        )),
+        Some(expected) => {
+            let auth_header = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "Missing Authorization header".to_string(),
+                    )
+                })?;
+
+            let token = auth_header
+                .strip_prefix("Bearer ")
+                .ok_or_else(|| {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "Authorization header must use Bearer scheme".to_string(),
+                    )
+                })?;
+
+            if token != expected {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Invalid API key".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn validate_hex(s: &str, name: &str) -> Result<(), (StatusCode, String)> {
@@ -416,8 +460,12 @@ struct LockRequest {
 
 async fn lock_assets(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<LockRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // F1.4: Verify API key before allowing bridge write
+    verify_bridge_auth(&headers, &state.bridge_api_key)?;
+
     let transfer = state
         .bridge
         .lock_assets(&req.source_chain, &req.object_id, &req.dest_chain, &req.dest_owner)
@@ -437,8 +485,12 @@ struct MintRequest {
 
 async fn mint_from_proof(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<MintRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // F1.4: Verify API key before allowing bridge write
+    verify_bridge_auth(&headers, &state.bridge_api_key)?;
+
     let transfer = state
         .bridge
         .mint_from_proof(&req.transfer_id, &req.proof)

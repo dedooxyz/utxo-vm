@@ -109,10 +109,16 @@ impl ConsensusManager {
             return false;
         }
 
-        // Check if validator is registered
+        // F1.3: Fail-closed — if no validators are registered, reject all attestations
         match self.known_validators.read() {
             Ok(validators) => {
-                if !validators.is_empty() && !validators.contains(&attestation.validator_pubkey) {
+                if validators.is_empty() {
+                    tracing::warn!(
+                        "[Consensus] Rejected attestation: no validators registered (fail-closed)"
+                    );
+                    return false;
+                }
+                if !validators.contains(&attestation.validator_pubkey) {
                     tracing::warn!(
                         "[Consensus] Rejected attestation from unregistered validator: {}",
                         attestation.validator_pubkey
@@ -225,7 +231,10 @@ mod tests {
     fn test_sign_and_verify_attestation() {
         let mgr = ConsensusManager::new(1);
         let secp = Secp256k1::new();
-        let (sk, _pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+        let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+
+        // F1.3: Register the validator before adding attestation (fail-closed requires it)
+        mgr.register_validator(&hex::encode(pk.serialize()));
 
         let attestation = mgr
             .sign_state_root(&sk, "JKC", 100, "hash_abc", "state_root_123")
@@ -241,7 +250,10 @@ mod tests {
     fn test_equivocation_detection_and_slashing_proof() {
         let mgr = ConsensusManager::new(1);
         let secp = Secp256k1::new();
-        let (sk, _pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+        let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+
+        // F1.3: Register the validator (fail-closed requires it)
+        mgr.register_validator(&hex::encode(pk.serialize()));
 
         // Sign first valid root
         let att1 = mgr
@@ -266,5 +278,22 @@ mod tests {
 
         // Verify cryptographic validity of the proof
         assert!(crate::consensus::covenants::verify_equivocation_proof(proof));
+    }
+
+    #[test]
+    fn test_fail_closed_no_validators_rejects_attestation() {
+        // F1.3: With zero registered validators, ALL attestations must be rejected
+        let mgr = ConsensusManager::new(3);
+        let secp = Secp256k1::new();
+        let (sk, _pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+
+        // Do NOT register any validator — empty set
+        let attestation = mgr
+            .sign_state_root(&sk, "JKC", 100, "hash_abc", "root_xyz")
+            .expect("Signing should succeed");
+
+        // Despite valid signature, must be rejected because no validators registered
+        let added = mgr.add_attestation(attestation);
+        assert!(!added, "add_attestation must fail when no validators are registered (fail-closed)");
     }
 }

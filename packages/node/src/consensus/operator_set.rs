@@ -8,7 +8,6 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Operator status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

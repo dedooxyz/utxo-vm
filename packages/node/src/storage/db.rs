@@ -13,6 +13,7 @@ const TRANSITIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("tr
 const BLOCKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const CHAIN_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("chain_meta");
 const UNDO_LOGS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("undo_logs");
+const BRIDGE_TRANSFERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bridge_transfers");
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -33,6 +34,7 @@ impl StateStore {
             let _ = write_txn.open_table(BLOCKS_TABLE)?;
             let _ = write_txn.open_table(CHAIN_META_TABLE)?;
             let _ = write_txn.open_table(UNDO_LOGS_TABLE)?;
+            let _ = write_txn.open_table(BRIDGE_TRANSFERS_TABLE)?;
         }
         write_txn.commit()?;
 
@@ -335,5 +337,36 @@ impl StateStore {
         }
 
         Ok(rolled_back)
+    }
+
+    // ── Bridge transfer persistence ─────────────────────────────────────────
+
+    pub fn save_bridge_transfer(
+        &self,
+        transfer: &crate::cross_chain::bridge::BridgeTransfer,
+    ) -> Result<()> {
+        let serialized = serde_json::to_vec(transfer)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(BRIDGE_TRANSFERS_TABLE)?;
+            table.insert(transfer.id.as_str(), serialized.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_bridge_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<crate::cross_chain::bridge::BridgeTransfer>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(BRIDGE_TRANSFERS_TABLE)?;
+        if let Some(val) = table.get(transfer_id)? {
+            let transfer: crate::cross_chain::bridge::BridgeTransfer =
+                serde_json::from_slice(val.value())?;
+            Ok(Some(transfer))
+        } else {
+            Ok(None)
+        }
     }
 }

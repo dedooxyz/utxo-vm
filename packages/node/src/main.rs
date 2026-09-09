@@ -75,6 +75,10 @@ struct Cli {
 
     #[arg(long, env = "CHANNEL_SIZE", default_value_t = 100)]
     channel_size: usize,
+
+    /// API key for bridge write endpoints. If not set, bridge writes are disabled.
+    #[arg(long, env = "BRIDGE_API_KEY")]
+    bridge_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -276,6 +280,7 @@ async fn main() -> Result<()> {
         bridge,
         relay,
         rate_limiter: std::sync::Arc::new(utxo_vmd::rpc::server::RateLimiter::new(cli.rate_limit_rps)),
+        bridge_api_key: cli.bridge_api_key,
     };
 
     let router = create_router(app_state);

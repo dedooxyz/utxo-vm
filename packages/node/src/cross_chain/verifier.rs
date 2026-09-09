@@ -92,9 +92,20 @@ impl CrossChainVerifier {
         }
     }
 
-    /// Verify quorum (≥2/3 validator attestations for same state root)
+    /// Verify quorum (≥2/3 validator attestations for same state root).
+    /// F1.3: Fail-closed — if no validators are registered, quorum is never reached.
     fn verify_quorum(&self, proof: &CrossChainProof) -> bool {
         if proof.attestations.is_empty() {
+            return false;
+        }
+
+        let total_validators = self.consensus.get_validator_count();
+
+        // F1.3: Fail-closed — zero validators means no trust anchor, reject always
+        if total_validators == 0 {
+            tracing::warn!(
+                "[CrossChain] Quorum check failed-closed: no validators registered"
+            );
             return false;
         }
 
@@ -106,7 +117,6 @@ impl CrossChainVerifier {
 
         // Find the state_root with most attestations
         let max_count = root_counts.values().max().unwrap_or(&0);
-        let total_validators = self.consensus.get_validator_count();
 
         // Check if ≥2/3 quorum
         let required = (total_validators * 2 + 2) / 3; // Ceiling division
