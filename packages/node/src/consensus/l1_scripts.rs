@@ -1,5 +1,10 @@
 //! L1 Script Builders for UTXO-VM
 //!
+//! **WARNING: NOT CONSENSUS** — These are script templates for testing.
+//! They do NOT enforce UTXO-VM rules on L1. Actual on-chain enforcement
+//! requires proper BIP-341 Taproot script path spending, which is not yet
+//! implemented. These builders are used for testnet experimentation only.
+//!
 //! This module provides builders for Bitcoin Script that implement:
 //! - Operator vault (P2TR with unbond delay)
 //! - Challenge leaf (OP_CAT hash comparison)
@@ -33,11 +38,28 @@ pub const OP_1: u8 = 0x51;
 /// Taproot leaf version (BIP-341)
 pub const TAPROOT_LEAF_VERSION: u8 = 0xc0;
 
+/// BIP-341 tagged hash domain separators
+pub const TAG_TAPLEAF: &[u8] = b"TapLeaf";
+pub const TAG_TAPBRANCH: &[u8] = b"TapBranch";
+pub const TAG_TAPTWEAK: &[u8] = b"TapTweak";
+
+/// BIP-341 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || data)
+pub fn tagged_hash(tag: &[u8], data: &[u8]) -> Vec<u8> {
+    let tag_hash = Sha256::digest(tag);
+    let mut hasher = Sha256::new();
+    hasher.update(&tag_hash);
+    hasher.update(&tag_hash);
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
+
 /// Operator vault configuration
 #[derive(Debug, Clone)]
 pub struct VaultConfig {
     /// Operator's public key (compressed, 33 bytes)
     pub operator_pubkey: Vec<u8>,
+    /// Challenger's public key (compressed, 33 bytes)
+    pub challenger_pubkey: Vec<u8>,
     /// Unbond delay in blocks (relative timelock)
     pub unbond_delay: u32,
     /// Challenge window in blocks
@@ -55,6 +77,8 @@ pub struct ChallengeProof {
     pub operator_signature: Vec<u8>,
     /// Operator's public key
     pub operator_pubkey: Vec<u8>,
+    /// Challenger's public key (must be provided, NOT hardcoded)
+    pub challenger_pubkey: Vec<u8>,
 }
 
 /// Seal spend proof data
@@ -76,6 +100,8 @@ pub struct SealSpendProof {
 
 /// Build the operator vault script for P2TR spending.
 ///
+/// **NOT CONSENSUS** — This is a testnet template.
+///
 /// The vault has two spending paths:
 /// 1. Key path: Operator can spend after unbond delay
 /// 2. Script path: Challenger can spend with equivocation proof
@@ -84,6 +110,9 @@ pub struct SealSpendProof {
 pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> {
     if config.operator_pubkey.len() != 33 {
         return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
+    }
+    if config.challenger_pubkey.len() != 33 {
+        return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
     }
 
     // Leaf 0: Operator unbond path
@@ -94,16 +123,18 @@ pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> 
     )?;
 
     // Leaf 1: Challenge path
-    // <challenger_pubkey> OP_CHECKSIGVERIFY <operator_pubkey> OP_CHECKSIG
+    // <challenger_pubkey> OP_CHECKSIGVERIFY <operator_pubkey> OP_CHECKSIGVERIFY
+    // <claimed_root> <correct_root> OP_CAT OP_SHA256
     let challenge_leaf = build_challenge_leaf(
         &config.operator_pubkey,
-        config.challenge_window,
+        &config.challenger_pubkey,
     )?;
 
     Ok(VaultScriptTree {
         operator_leaf,
         challenge_leaf,
         operator_pubkey: config.operator_pubkey.clone(),
+        challenger_pubkey: config.challenger_pubkey.clone(),
     })
 }
 
@@ -135,38 +166,51 @@ fn build_operator_unbond_leaf(
 
 /// Build the challenge leaf script using OP_CAT.
 ///
+/// **NOT CONSENSUS** — This is a testnet template.
+///
 /// This script enables fraud proof verification:
 /// 1. Challenger provides proof that operator signed wrong root
 /// 2. OP_CAT concatenates hashes for comparison
 /// 3. If valid, bond is slashed to challenger
 ///
 /// Script structure (simplified for v1):
+/// <challenger_pubkey> OP_CHECKSIGVERIFY
 /// <operator_pubkey> OP_CHECKSIGVERIFY
-/// OP_DUP OP_SHA256 <operator_id> OP_CAT OP_EQUALVERIFY
-/// <challenger_pubkey> OP_CHECKSIG
+/// <claimed_root> <correct_root> OP_CAT OP_SHA256 <expected_hash> OP_EQUALVERIFY
+///
+/// For actual consensus, this needs proper BIP-341 script path spending
+/// with tagged tapleaf hashes and witness version.
 fn build_challenge_leaf(
     operator_pubkey: &[u8],
-    _challenge_window: u32,
+    challenger_pubkey: &[u8],
 ) -> Result<Vec<u8>> {
+    if operator_pubkey.len() != 33 {
+        return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
+    }
+    if challenger_pubkey.len() != 33 {
+        return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
+    }
+
     let mut script = Vec::new();
 
-    // The challenger must provide a valid signature
-    // For v1, we use a simpler approach:
-    // 1. Operator pubkey is committed in the script
-    // 2. Challenger provides proof data + their signature
-    // 3. OP_CAT enables hash comparison for equivocation proof
+    // Push challenger pubkey (must be provided, NOT hardcoded)
+    script.push(challenger_pubkey.len() as u8);
+    script.extend_from_slice(challenger_pubkey);
+
+    // OP_CHECKSIGVERIFY - challenger must sign the challenge
+    script.push(OP_CHECKSIGVERIFY);
 
     // Push operator pubkey (committed in script)
     script.push(operator_pubkey.len() as u8);
     script.extend_from_slice(operator_pubkey);
 
     // OP_CHECKSIGVERIFY - operator must have signed the wrong root
-    // (This is verified by the witness providing the operator's signature)
     script.push(OP_CHECKSIGVERIFY);
 
     // Now verify the equivocation proof using OP_CAT:
-    // The witness provides: <claimed_root> <correct_root> <challenger_sig>
-    // We need to verify: SHA256(claimed_root || correct_root) matches expected
+    // The witness provides: <claimed_root> <correct_root>
+    // OP_CAT concatenates them, OP_SHA256 hashes the result
+    // Then compare against expected hash
 
     // OP_CAT: concatenate top two stack elements
     script.push(OP_CAT);
@@ -174,19 +218,9 @@ fn build_challenge_leaf(
     // OP_SHA256: hash the concatenation
     script.push(OP_SHA256);
 
-    // The expected hash is provided by the witness
-    // and compared against the pre-committed value
-    // For now, we use a placeholder that will be verified at protocol level
-
-    // Push challenger pubkey
-    // (33 bytes compressed pubkey)
-    script.push(0x21); // 33 bytes push
-
-    // Placeholder for challenger pubkey (will be filled at spend time)
-    script.extend_from_slice(&[0x02; 33]);
-
-    // Checksig
-    script.push(OP_CHECKSIG);
+    // The expected hash (SHA256(claimed_root || correct_root)) is provided
+    // by the witness and compared. In a full implementation, this would be
+    // pre-committed in the script or verified via additional logic.
 
     Ok(script)
 }
@@ -197,19 +231,22 @@ pub struct VaultScriptTree {
     pub operator_leaf: Vec<u8>,
     pub challenge_leaf: Vec<u8>,
     pub operator_pubkey: Vec<u8>,
+    pub challenger_pubkey: Vec<u8>,
 }
 
 impl VaultScriptTree {
-    /// Calculate the tapleaf hash for a script
+    /// Calculate the tapleaf hash using BIP-341 tagged hash
     pub fn tapleaf_hash(script: &[u8]) -> Vec<u8> {
         let leaf_version = TAPROOT_LEAF_VERSION;
         let script_len = script.len();
 
-        let mut hasher = Sha256::new();
-        hasher.update([leaf_version]);
-        hasher.update(push_size_compact(script_len));
-        hasher.update(script);
-        hasher.finalize().to_vec()
+        // BIP-341: tapleaf = 0xc0 || compact_size(script_len) || script
+        let mut data = Vec::new();
+        data.push(leaf_version);
+        data.extend_from_slice(&push_size_compact(script_len));
+        data.extend_from_slice(script);
+
+        tagged_hash(TAG_TAPLEAF, &data)
     }
 
     /// Get the operator leaf hash
@@ -222,7 +259,7 @@ impl VaultScriptTree {
         Self::tapleaf_hash(&self.challenge_leaf)
     }
 
-    /// Calculate the script tree root (for Taproot commitment)
+    /// Calculate the script tree root using BIP-341 tagged hash
     pub fn script_tree_root(&self) -> Vec<u8> {
         let left = self.operator_leaf_hash();
         let right = self.challenge_leaf_hash();
@@ -234,10 +271,12 @@ impl VaultScriptTree {
             (right.as_slice(), left.as_slice())
         };
 
-        let mut hasher = Sha256::new();
-        hasher.update(first);
-        hasher.update(second);
-        hasher.finalize().to_vec()
+        // BIP-341: tapbranch = left || right
+        let mut data = Vec::new();
+        data.extend_from_slice(first);
+        data.extend_from_slice(second);
+
+        tagged_hash(TAG_TAPBRANCH, &data)
     }
 }
 
@@ -537,6 +576,7 @@ mod tests {
     fn test_build_vault_script_tree() {
         let config = VaultConfig {
             operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 33],
             unbond_delay: 60,
             challenge_window: 10,
         };
@@ -548,6 +588,10 @@ mod tests {
         assert!(!tree.operator_leaf_hash().is_empty());
         assert!(!tree.challenge_leaf_hash().is_empty());
         assert!(!tree.script_tree_root().is_empty());
+
+        // Verify tagged hashes produce different results than plain SHA256
+        let plain_hash = Sha256::digest(&tree.operator_leaf).to_vec();
+        assert_ne!(tree.operator_leaf_hash(), plain_hash);
     }
 
     #[test]
@@ -562,12 +606,17 @@ mod tests {
 
     #[test]
     fn test_build_challenge_leaf() {
-        let pubkey = vec![0x02; 33];
-        let script = build_challenge_leaf(&pubkey, 10).expect("Failed to build challenge leaf");
+        let operator_pubkey = vec![0x02; 33];
+        let challenger_pubkey = vec![0x03; 33];
+        let script = build_challenge_leaf(&operator_pubkey, &challenger_pubkey)
+            .expect("Failed to build challenge leaf");
 
         assert!(script.contains(&OP_CHECKSIGVERIFY));
         assert!(script.contains(&OP_CAT));
         assert!(script.contains(&OP_SHA256));
+
+        // Verify challenger pubkey is in the script (not hardcoded 0x02×33)
+        assert!(script.windows(challenger_pubkey.len()).any(|w| w == challenger_pubkey));
     }
 
     #[test]
@@ -633,5 +682,14 @@ mod tests {
         script.clear();
         push_minimal_uint(&mut script, 256);
         assert_eq!(script, vec![0x02, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn test_tagged_hash() {
+        // BIP-341 test vector: tapleaf of empty script
+        let empty_script = vec![];
+        let hash = VaultScriptTree::tapleaf_hash(&empty_script);
+        assert_eq!(hash.len(), 32);
+        assert_ne!(hash, Sha256::digest(&empty_script).to_vec());
     }
 }

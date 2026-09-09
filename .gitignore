@@ -8,15 +8,14 @@ target/
 .env
 .env.local
 
+# Data directory (private keys, databases)
+data/
+
 # Database files
 *.db
 *.db-shm
 *.db-wal
 *.redb
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/*.redb
 **/data/*.db
 **/data/*.db-shm
 **/data/*.db-wal

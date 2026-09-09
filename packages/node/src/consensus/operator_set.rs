@@ -38,6 +38,8 @@ pub struct Operator {
     pub status: OperatorStatus,
     /// Registration block height
     pub registered_at: u64,
+    /// Block height when unbond was initiated (None if not unbonding)
+    pub unbond_started_at: Option<u64>,
     /// Last batch posted block height
     pub last_batch_block: Option<u64>,
     /// Last batch state root
@@ -143,6 +145,7 @@ impl OperatorSet {
             bond_utxo: Some(bond_utxo.to_string()),
             status: OperatorStatus::Active,
             registered_at: block_height,
+            unbond_started_at: None,
             last_batch_block: None,
             last_batch_root: None,
             total_batches: 0,
@@ -168,7 +171,7 @@ impl OperatorSet {
         }
 
         operator.status = OperatorStatus::Unbonding;
-        // Unbond delay will be checked when operator tries to exit
+        operator.unbond_started_at = Some(block_height);
 
         Ok(())
     }
@@ -184,12 +187,14 @@ impl OperatorSet {
             return Err(anyhow!("Operator is not unbonding"));
         }
 
-        // Check unbond delay
-        let registered_at = operator.registered_at;
-        if block_height < registered_at + self.config.unbond_delay as u64 {
+        let unbond_started_at = operator.unbond_started_at
+            .ok_or_else(|| anyhow!("Unbond start time not recorded"))?;
+
+        // Check unbond delay from when unbond was initiated
+        if block_height < unbond_started_at + self.config.unbond_delay as u64 {
             return Err(anyhow!(
                 "Unbond delay not met. Need {} more blocks",
-                registered_at + self.config.unbond_delay as u64 - block_height
+                unbond_started_at + self.config.unbond_delay as u64 - block_height
             ));
         }
 

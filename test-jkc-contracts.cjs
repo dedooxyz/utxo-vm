@@ -30,9 +30,9 @@ const JKC_TESTNET = {
 
 const network = JKC_TESTNET;
 
-// Wallet from previous tests
+// Wallet from previous tests (reuse the same funded wallet)
 const wallet = {
-  privateKey: 'cQo84YPrqxfALWPX4R5WxvmNi2vKtMkEjqVRzX7BJQ9aLqZQPvck',
+  privateKey: 'cVDJUtDjdaM25yNVVDLLX3hcHUfth4c7tY3rSc4hy9e8ibtCuj6G',
   address: 'muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi',
 };
 
@@ -115,11 +115,11 @@ async function deployNativeVault() {
   
   psbt.addOutput({
     script: embed.output,
-    value: 0,
+    value: 0n,
   });
   
   // Change output
-  const changeAmount = utxo.value - 1000;
+  const changeAmount = BigInt(utxo.value) - 1000n;
   psbt.addOutput({
     address: address,
     value: changeAmount,
@@ -150,7 +150,7 @@ async function depositToVault(vaultTxid) {
   
   console.log(`Using UTXO: ${utxo.txid}:${utxo.vout} (${utxo.value} satoshis)`);
   
-  const depositAmount = 50_000_000; // 0.5 JKC
+  const depositAmount = 50000000n; // 0.5 JKC
   
   const psbt = new bitcoin.Psbt({ network });
   
@@ -176,7 +176,7 @@ async function depositToVault(vaultTxid) {
   
   psbt.addOutput({
     script: embed.output,
-    value: 0,
+    value: 0n,
   });
   
   // Output to vault (locked satoshis)
@@ -186,7 +186,7 @@ async function depositToVault(vaultTxid) {
   });
   
   // Change
-  const changeAmount = utxo.value - depositAmount - 1000;
+  const changeAmount = BigInt(utxo.value) - depositAmount - 1000n;
   psbt.addOutput({
     address: address,
     value: changeAmount,
@@ -246,10 +246,10 @@ async function deployUTX721() {
   
   psbt.addOutput({
     script: embed.output,
-    value: 0,
+    value: 0n,
   });
   
-  const changeAmount = utxo.value - 1000;
+  const changeAmount = BigInt(utxo.value) - 1000n;
   psbt.addOutput({
     address: address,
     value: changeAmount,
@@ -316,10 +316,10 @@ async function deployAtomicSwap() {
   
   psbt.addOutput({
     script: embed.output,
-    value: 0,
+    value: 0n,
   });
   
-  const changeAmount = utxo.value - 1000;
+  const changeAmount = BigInt(utxo.value) - 1000n;
   psbt.addOutput({
     address: address,
     value: changeAmount,

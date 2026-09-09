@@ -1,29 +1,30 @@
 # UTXO-VM: Universal Smart Object Engine for UTXO Blockchains
 
-> **Clean-Room, Turing-Complete, Patent-Free Smart Object Protocol for Any UTXO Blockchain (Bitcoin, Litecoin, Dogecoin, Junkcoin, Bells, etc.) with Native Privacy Extension Support.**
+> **Chain-Agnostic, Turing-Complete, Patent-Free Smart Object Protocol for UTXO Blockchains.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Language: Rust / AssemblyScript](https://img.shields.io/badge/Language-Rust%20%7C%20AssemblyScript-orange.svg)](https://www.rust-lang.org/)
-[![Multi-Chain](https://img.shields.io/badge/Chains-BTC%20%7C%20LTC%20%7C%20DOGE%20%7C%20JKC%20%7C%20BEL-blue.svg)](https://github.com/dedooxyz/utxo-vm)
 
 ---
 
-## 📖 Overview
+## ⚠️ Current Status: L1.5 Protocol Kit (NOT v1)
 
-**UTXO-VM** is a **chain-agnostic, stateful smart object execution framework** engineered for any UTXO-based Proof-of-Work blockchain.
+**UTXO-VM is a metaprotocol that executes WASM on UTXO chains.** It is NOT L2, NOT L3, and does NOT modify L1 consensus.
 
-Instead of treating transactions as passive text inscriptions (like BRC-20) or using patented proprietary JS runtimes, UTXO-VM executes **gas-metered WebAssembly (WASM)** compiled from **AssemblyScript (TypeScript)**, bound directly to UTXO **Single-Use Seals**.
+**What works today:**
+- Deterministic WASM execution via Wasmtime with fuel metering
+- Single-use seal model (state bound to UTXOs)
+- Contract compilation (AssemblyScript → WASM)
+- State replay verification (two replays → same root)
+- Script templates for vault, challenge, silence escape (testnet only)
 
----
+**What does NOT work yet:**
+- On-chain challenge spending a liar's bond (requires BIP-341 script path spending)
+- Operator slashing on-chain (only in-memory struct)
+- C ABI for Core wallet integration
+- Second independent implementation
 
-## ⚡ Key Highlights
-
-1. **Chain-Agnostic by Design**: Runs seamlessly across Bitcoin, Litecoin, Dogecoin, Junkcoin, Bells, Bitcoin Cash, and custom UTXO chains.
-2. **100% Clean-Room FOSS**: Completely free of proprietary patent claims and third-party commercial royalties.
-3. **AssemblyScript & WASM Native**: High-level TypeScript syntax compiled to minimal, high-speed WASM binary payloads.
-4. **UTXO Single-Use Seals**: Each smart object instance is mapped to a UTXO (`txid:vout`). State transitions spend the input seal and create a new output seal.
-5. **Universal Privacy & Stealth Hooks**: Compatible with confidential extension blocks (MWEB, Pedersen commitments, and Stealth Addresses).
-6. **Deterministic Gas Metering**: Strict instruction counting preventing DoS and infinite loops.
+**Do not use in production.** This is a research prototype.
 
 ---
 
@@ -31,22 +32,125 @@ Instead of treating transactions as passive text inscriptions (like BRC-20) or u
 
 | Package | Path | Description |
 | :--- | :--- | :--- |
-| **`@utxo-vm/contracts`** | `packages/contracts` | Standard smart contract library (UTX20, UTX721, NativeVault, Swap) |
-| **`@utxo-vm/core-vm`** | `packages/core-vm` | High-performance Rust & Wasmtime deterministic execution engine |
-| **`@utxo-vm/sdk`** | `packages/sdk` | Multi-chain TypeScript SDK for web wallets, dApps, and transaction serialization |
-| **`@utxo-vm/indexer`** | `packages/indexer` | Multi-chain block scanner & UTXO state database |
-| **`@utxo-vm/cli`** | `packages/cli` | Developer CLI tool (`utxo-vm compile`, `utxo-vm deploy`, `utxo-vm call`) |
+| **`utxo-core-vm`** | `packages/core-vm` | Rust + Wasmtime deterministic execution engine |
+| **`utxo-vmd`** | `packages/node` | Node daemon with scanner, consensus, L1 scripts |
+| **`@utxo-vm/contracts`** | `packages/contracts` | AssemblyScript contracts (UTX20, UTX721, NativeVault, Swap) |
+| **`@utxo-vm/sdk`** | `packages/sdk` | TypeScript SDK for transaction building |
+| **`@utxo-vm/cli`** | `packages/cli` | Developer CLI tool |
 
 ---
 
-## 🚀 Quick Start
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                  User / Wallet                   │
+└─────────────────┬───────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────┐
+│              UTXO-VM Runtime (L1.5)              │
+│  ┌─────────────────────────────────────────┐    │
+│  │  WASM Execution (Wasmtime + Fuel)       │    │
+│  └─────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────┐    │
+│  │  Single-Use Seals (UTXO Binding)        │    │
+│  └─────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────┐    │
+│  │  State Management (SMT)                 │    │
+│  └─────────────────────────────────────────┘    │
+└─────────────────┬───────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────┐
+│           L1 Blockchain (JKC, BTC, LTC)         │
+│  • Blocks, UTXOs, fees                          │
+│  • Taproot bonds (planned)                      │
+│  • Challenge / exit (planned)                   │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔧 Quick Start
 
 ```bash
-# Clone & install dependencies
+# Clone & install
 git clone https://github.com/dedooxyz/utxo-vm.git
 cd utxo-vm
-pnpm install
+npm install
 
-# Build all packages & compile contracts to WASM
-pnpm build
+# Build WASM contracts
+cd packages/contracts
+npm run asbuild:release
+
+# Run core-vm tests
+cd ../core-vm
+cargo test
+
+# Run node tests
+cd ../node
+cargo test
 ```
+
+---
+
+## 📋 Contract Types
+
+| Contract | Description | Status |
+| :--- | :--- | :--- |
+| **SOT** | Smart Object Token (base) | ✅ Implemented |
+| **UTX20** | Fungible token (ERC-20 like) | ✅ Implemented |
+| **UTX721/SON** | Non-fungible token | ✅ Implemented |
+| **NativeVault** | Native coin vault | ✅ Implemented |
+| **AtomicSwap** | Hash time-locked contract | ✅ Implemented |
+| **Entry** | Contract dispatcher | ✅ Implemented |
+
+---
+
+## 🧪 Testing
+
+```bash
+# Core VM tests (9 tests)
+cargo test -p utxo-core-vm
+
+# Node consensus tests (24 tests)
+cargo test -p utxo-vmd --lib consensus
+
+# Full testnet deployment
+node test-jkc-minimal-product.cjs
+```
+
+---
+
+## 📄 Documentation
+
+- [Trust Model](docs/TRUST-MODEL.tex) - Adversary model, JKC parameters, slashing
+- [WASM ISA](docs/WASM-ISA.md) - Supported WASM features and execution model
+- [Lifcycle](docs/LIFECYCLE.md) - Compile → Deploy → Call → Challenge
+- [JKC Chain Work](docs/JKC-CHAIN-WORK.md) - Taproot, opcodes, addresses
+- [Mission](MISSION.md) - 9-step roadmap with progress
+
+---
+
+## ⚖️ Trust Model (Summary)
+
+- **L1 guarantees:** UTXO ownership, transaction ordering, block rewards
+- **Indexer guarantees:** Deterministic WASM execution, signed attestation
+- **What a liar can steal:** Nothing if bond > TVL and challenge works
+- **What a stranger can slash:** Equivocation (two signed conflicting roots)
+
+See [Trust Model](docs/TRUST-MODEL.tex) for full specification.
+
+---
+
+## 🚫 What This Is NOT
+
+- **NOT L2** - No separate consensus, no sequencer, no bridge
+- **NOT a new coin** - Uses existing chain native currency
+- **NOT production ready** - Research prototype, testnet only
+- **NOT patent-free yet** - Needs legal review before claims
+
+---
+
+## 📄 License
+
+MIT
