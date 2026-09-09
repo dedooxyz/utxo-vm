@@ -456,6 +456,10 @@ struct LockRequest {
     object_id: String,
     dest_chain: String,
     dest_owner: String,
+    /// P0-fu.3: secp256k1 hex pubkey of the caller (must match object owner)
+    caller_pubkey: String,
+    /// P0-fu.3: secp256k1 compact hex signature over lock message
+    signature: String,
 }
 
 async fn lock_assets(
@@ -468,8 +472,15 @@ async fn lock_assets(
 
     let transfer = state
         .bridge
-        .lock_assets(&req.source_chain, &req.object_id, &req.dest_chain, &req.dest_owner)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .lock_assets(
+            &req.source_chain,
+            &req.object_id,
+            &req.dest_chain,
+            &req.dest_owner,
+            &req.caller_pubkey,
+            &req.signature,
+        )
+        .map_err(|e| (StatusCode::FORBIDDEN, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "status": "locked",

@@ -13,13 +13,18 @@ async fn test_cross_chain_bridge_flow() {
     let verifier = Arc::new(CrossChainVerifier::new(consensus.clone()));
     let bridge = Arc::new(BridgeManager::new(verifier.clone(), store.clone()));
 
+    // Generate keypair for object owner
+    let secp = secp256k1::Secp256k1::new();
+    let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+    let owner_hex = hex::encode(pk.serialize());
+
     // Insert test object on source chain
     let obj = SmartObjectRecord {
         object_id: "obj_son_token".to_string(),
         code_hash: "utx20_son".to_string(),
         seal: "tx_source:0".to_string(),
         satoshis: 1_000_000,
-        owner: "owner_jkc".to_string(),
+        owner: owner_hex.clone(),
         state_data: serde_json::json!({
             "ticker": "SON",
             "balance": 1000
@@ -29,9 +34,22 @@ async fn test_cross_chain_bridge_flow() {
     };
     store.save_object(&obj).unwrap();
 
+    // Sign the lock message
+    use sha2::{Digest, Sha256};
+    use secp256k1::Message;
+    let msg = format!("lock:JKC:obj_son_token:DOGE:doge_owner_addr");
+    let mut hasher = Sha256::new();
+    hasher.update(msg.as_bytes());
+    let digest = hasher.finalize();
+    let mut msg_bytes = [0u8; 32];
+    msg_bytes.copy_from_slice(&digest);
+    let message = Message::from_digest(msg_bytes);
+    let sig = secp.sign_ecdsa(&message, &sk);
+    let sig_hex = hex::encode(sig.serialize_compact());
+
     // Step 1: Lock assets on source chain (JKC)
     let transfer = bridge
-        .lock_assets("JKC", "obj_son_token", "DOGE", "doge_owner_addr")
+        .lock_assets("JKC", "obj_son_token", "DOGE", "doge_owner_addr", &owner_hex, &sig_hex)
         .unwrap();
 
     assert_eq!(transfer.source_chain, "JKC");

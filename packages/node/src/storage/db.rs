@@ -14,6 +14,7 @@ const BLOCKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks")
 const CHAIN_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("chain_meta");
 const UNDO_LOGS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("undo_logs");
 const BRIDGE_TRANSFERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bridge_transfers");
+const MINTED_PROOFS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("minted_proofs");
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -35,6 +36,7 @@ impl StateStore {
             let _ = write_txn.open_table(CHAIN_META_TABLE)?;
             let _ = write_txn.open_table(UNDO_LOGS_TABLE)?;
             let _ = write_txn.open_table(BRIDGE_TRANSFERS_TABLE)?;
+            let _ = write_txn.open_table(MINTED_PROOFS_TABLE)?;
         }
         write_txn.commit()?;
 
@@ -365,6 +367,45 @@ impl StateStore {
             let transfer: crate::cross_chain::bridge::BridgeTransfer =
                 serde_json::from_slice(val.value())?;
             Ok(Some(transfer))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // ── Minted proof persistence (replay guard survives restart) ───────────
+
+    /// Atomically check whether `object_id` was already minted, and if not,
+    /// record it as minted by `transfer_id`. Returns Ok(true) if newly inserted,
+    /// Ok(false) if already present (replay), Err on storage failure.
+    pub fn check_and_insert_minted_proof(
+        &self,
+        object_id: &str,
+        transfer_id: &str,
+    ) -> Result<bool> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(MINTED_PROOFS_TABLE)?;
+            if let Some(existing) = table.get(object_id)? {
+                // Already minted — check if it's the same transfer (idempotent)
+                if existing.value() == transfer_id {
+                    return Ok(false); // same transfer, not a replay
+                }
+                // Different transfer — this is a replay
+                return Ok(false);
+            }
+            // Not yet minted — insert atomically
+            table.insert(object_id, transfer_id)?;
+        }
+        write_txn.commit()?;
+        Ok(true)
+    }
+
+    /// Read-through check: was this object_id already minted?
+    pub fn get_minted_proof(&self, object_id: &str) -> Result<Option<String>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(MINTED_PROOFS_TABLE)?;
+        if let Some(val) = table.get(object_id)? {
+            Ok(Some(val.value().to_string()))
         } else {
             Ok(None)
         }

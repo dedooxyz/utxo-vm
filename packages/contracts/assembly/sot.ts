@@ -24,13 +24,17 @@ export class SmartObjectToken {
   transfer(to: string, amount: u64): SmartObjectToken {
     let caller = HostContext.getCaller();
     assert(caller == this.owner, "Unauthorized: Only token owner can transfer");
-    assert(this.balance >= amount, "Insufficient balance");
+    // UTXO model: each seal holds the entire balance. Full transfer only.
+    assert(amount == this.balance, "UTXO transfer requires full balance: amount must equal balance");
     assert(amount > 0, "Amount must be greater than zero");
 
-    this.balance -= amount;
+    this.balance = 0;
     HostContext.emitEvent("Transfer", "Transferred " + amount.toString() + " " + this.symbol + " to " + to);
 
-    return new SmartObjectToken(this.name, this.symbol, this.decimals, this.totalSupply, to);
+    // Recipient gets a new token with balance == amount (not totalSupply).
+    let newToken = new SmartObjectToken(this.name, this.symbol, this.decimals, this.totalSupply, to);
+    newToken.balance = amount;
+    return newToken;
   }
 
   mint(to: string, amount: u64): SmartObjectToken {
@@ -41,7 +45,10 @@ export class SmartObjectToken {
     this.totalSupply += amount;
     HostContext.emitEvent("Mint", "Minted " + amount.toString() + " " + this.symbol + " to " + to);
 
-    return new SmartObjectToken(this.name, this.symbol, this.decimals, this.totalSupply, to);
+    // New token for recipient has balance == amount (the minted portion), not totalSupply
+    let newToken = new SmartObjectToken(this.name, this.symbol, this.decimals, this.totalSupply, to);
+    newToken.balance = amount;
+    return newToken;
   }
 
   burn(amount: u64): void {

@@ -277,6 +277,13 @@ impl VmRuntime {
         Ok(linker)
     }
 
+    /// Maximum buffer size for get_state output.
+    /// get_state doesn't report its own size upfront, so we allocate a fixed
+    /// scratch buffer. 64 KiB covers all current contract state payloads.
+    /// A future ABI revision could add a `get_state_size()` export to avoid
+    /// this fixed cap.
+    const GET_STATE_BUF_SIZE: usize = 64 * 1024;
+
     pub fn deploy(
         &self,
         wasm_bytes: &[u8],
@@ -299,37 +306,67 @@ impl VmRuntime {
             .instantiate(&mut store, &module)
             .map_err(|e| format!("Instantiation error: {}", e))?;
 
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or_else(|| "Memory not found".to_string())?;
+
         let mut return_code = 0;
         if let Ok(init_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "init") {
-            let memory = instance
-                .get_memory(&mut store, "memory")
-                .ok_or_else(|| "Memory not found".to_string())?;
-            
-            let args_ptr = 0x1000;
+            // P2: Use allocate() instead of hardcoded offset
+            let args_ptr = if !init_args.is_empty() {
+                if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut store, "allocate") {
+                    alloc_fn
+                        .call(&mut store, init_args.len() as i32)
+                        .map_err(|e| format!("allocate() error: {}", e))?
+                } else {
+                    // Fallback for modules without allocate — use low memory
+                    0x1000
+                }
+            } else {
+                0x1000 // init_args is empty, pointer doesn't matter
+            };
+
             if !init_args.is_empty() {
                 memory
-                    .write(&mut store, args_ptr, init_args)
+                    .write(&mut store, args_ptr as usize, init_args)
                     .map_err(|e| format!("Memory write error: {}", e))?;
             }
             return_code = init_fn
-                .call(&mut store, (args_ptr as i32, init_args.len() as i32))
+                .call(&mut store, (args_ptr, init_args.len() as i32))
                 .map_err(|e| format!("Init execution error: {}", e))?;
+
+            // Deallocate init args buffer
+            if !init_args.is_empty() {
+                if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "deallocate") {
+                    let _ = dealloc_fn.call(&mut store, (args_ptr, init_args.len() as i32));
+                }
+            }
         }
 
         let mut state_data = Vec::new();
         if let Ok(get_state_fn) = instance.get_typed_func::<i32, i32>(&mut store, "get_state") {
-            let state_out_ptr = 0x2000;
+            // P2: Allocate scratch buffer for get_state output
+            let state_out_ptr = if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut store, "allocate") {
+                alloc_fn
+                    .call(&mut store, Self::GET_STATE_BUF_SIZE as i32)
+                    .map_err(|e| format!("allocate() for get_state error: {}", e))?
+            } else {
+                0x2000
+            };
+
             let len = get_state_fn
-                .call(&mut store, state_out_ptr as i32)
+                .call(&mut store, state_out_ptr)
                 .unwrap_or(0);
             if len > 0 {
-                let memory = instance
-                    .get_memory(&mut store, "memory")
-                    .ok_or_else(|| "Memory not found".to_string())?;
                 state_data.resize(len as usize, 0);
                 memory
-                    .read(&store, state_out_ptr, &mut state_data)
+                    .read(&store, state_out_ptr as usize, &mut state_data)
                     .map_err(|e| format!("Memory read error: {}", e))?;
+            }
+
+            // Deallocate get_state buffer
+            if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "deallocate") {
+                let _ = dealloc_fn.call(&mut store, (state_out_ptr, Self::GET_STATE_BUF_SIZE as i32));
             }
         }
 
@@ -385,57 +422,87 @@ impl VmRuntime {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| "Module does not export 'memory'".to_string())?;
 
-        // Restore state before calling method
+        // Helper: allocate via guest, fallback to hardcoded offset.
+        // WASM only has i32/i64, so all pointers are i32.
+        let allocate_guest = |store: &mut Store<HostContext>, size: i32| -> i32 {
+            if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut *store, "allocate") {
+                alloc_fn.call(&mut *store, size).unwrap_or(0x1000)
+            } else {
+                0x1000
+            }
+        };
+
+        let deallocate_guest = |store: &mut Store<HostContext>, ptr: i32, size: i32| {
+            if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut *store, "deallocate") {
+                let _ = dealloc_fn.call(&mut *store, (ptr, size));
+            }
+        };
+
+        // P2: Restore state via allocate()
         if !state.state_data.is_empty() {
-            let state_ptr = 0x3000;
+            let state_ptr = allocate_guest(&mut store, state.state_data.len() as i32);
             memory
-                .write(&mut store, state_ptr, &state.state_data)
+                .write(&mut store, state_ptr as usize, &state.state_data)
                 .map_err(|e| format!("Failed to write state to guest memory: {}", e))?;
 
             if let Ok(restore_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "restore_state") {
                 restore_fn
-                    .call(&mut store, (state_ptr as i32, state.state_data.len() as i32))
+                    .call(&mut store, (state_ptr, state.state_data.len() as i32))
                     .map_err(|e| format!("State restore error: {}", e))?;
             }
+
+            deallocate_guest(&mut store, state_ptr, state.state_data.len() as i32);
         }
 
-        let method_ptr = 0x0500;
-        let args_ptr = 0x1000;
-
+        // P2: Allocate for method name
         let mut method_bytes = method.as_bytes().to_vec();
-        method_bytes.push(0);
+        method_bytes.push(0); // null terminator
+        let method_ptr = allocate_guest(&mut store, method_bytes.len() as i32);
         memory
-            .write(&mut store, method_ptr, &method_bytes)
+            .write(&mut store, method_ptr as usize, &method_bytes)
             .map_err(|e| format!("Failed to write method to guest memory: {}", e))?;
 
-        if !args.is_empty() {
+        // P2: Allocate for args
+        let args_ptr = if !args.is_empty() {
+            let ptr = allocate_guest(&mut store, args.len() as i32);
             memory
-                .write(&mut store, args_ptr, args)
+                .write(&mut store, ptr as usize, args)
                 .map_err(|e| format!("Failed to write args to guest memory: {}", e))?;
-        }
+            ptr
+        } else {
+            0x1000 // dummy pointer for empty args
+        };
 
         let mut return_code = 0;
         if let Ok(call_fn) = instance.get_typed_func::<(i32, i32, i32), i32>(&mut store, "call") {
             return_code = call_fn
                 .call(
                     &mut store,
-                    (method_ptr as i32, args_ptr as i32, args.len() as i32),
+                    (method_ptr, args_ptr, args.len() as i32),
                 )
                 .map_err(|e| format!("Call execution trapped: {}", e))?;
         }
 
+        // Deallocate method and args
+        deallocate_guest(&mut store, method_ptr, method_bytes.len() as i32);
+        if !args.is_empty() {
+            deallocate_guest(&mut store, args_ptr, args.len() as i32);
+        }
+
+        // P2: Read state via allocated buffer
         let mut updated_state_data = state.state_data.clone();
         if let Ok(get_state_fn) = instance.get_typed_func::<i32, i32>(&mut store, "get_state") {
-            let state_out_ptr = 0x2000;
+            let state_out_ptr = allocate_guest(&mut store, Self::GET_STATE_BUF_SIZE as i32);
             let len = get_state_fn
-                .call(&mut store, state_out_ptr as i32)
+                .call(&mut store, state_out_ptr)
                 .unwrap_or(0);
             if len > 0 {
                 updated_state_data.resize(len as usize, 0);
                 memory
-                    .read(&store, state_out_ptr, &mut updated_state_data)
+                    .read(&store, state_out_ptr as usize, &mut updated_state_data)
                     .map_err(|e| format!("Memory read error: {}", e))?;
             }
+            deallocate_guest(&mut store, state_out_ptr, Self::GET_STATE_BUF_SIZE as i32);
         }
 
         let fuel_left = store.get_fuel().unwrap_or(0);
