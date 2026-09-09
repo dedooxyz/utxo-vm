@@ -12,6 +12,7 @@
     "test": "npm run asbuild"
   },
   "devDependencies": {
-    "assemblyscript": "^0.27.29"
+    "assemblyscript": "^0.27.29",
+    "assemblyscript-json": "^1.1.0"
   }
 }

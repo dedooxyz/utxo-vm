@@ -385,6 +385,20 @@ impl VmRuntime {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| "Module does not export 'memory'".to_string())?;
 
+        // Restore state before calling method
+        if !state.state_data.is_empty() {
+            let state_ptr = 0x3000;
+            memory
+                .write(&mut store, state_ptr, &state.state_data)
+                .map_err(|e| format!("Failed to write state to guest memory: {}", e))?;
+
+            if let Ok(restore_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "restore_state") {
+                restore_fn
+                    .call(&mut store, (state_ptr as i32, state.state_data.len() as i32))
+                    .map_err(|e| format!("State restore error: {}", e))?;
+            }
+        }
+
         let method_ptr = 0x0500;
         let args_ptr = 0x1000;
 

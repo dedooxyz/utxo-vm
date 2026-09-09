@@ -134,7 +134,7 @@ fn test_compiled_assemblyscript_wasm_execution() {
                 "03deadbeef".to_string(),
                 seal.clone(),
                 50_000,
-                b"{\"name\":\"TestCoin\",\"symbol\":\"TC\",\"decimals\":8,\"totalSupply\":\"1000000\"}",
+                b"{\"name\":\"TestCoin\",\"symbol\":\"TC\",\"decimals\":8,\"totalSupply\":1000000,\"balance\":1000000,\"owner\":\"03deadbeef\"}",
             )
             .expect("Deploy failed");
 
