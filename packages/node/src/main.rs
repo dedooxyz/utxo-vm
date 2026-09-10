@@ -79,6 +79,17 @@ struct Cli {
     /// API key for bridge write endpoints. If not set, bridge writes are disabled.
     #[arg(long, env = "BRIDGE_API_KEY")]
     bridge_api_key: Option<String>,
+
+    /// Enable JKC bonding/slashing. When enabled, the node verifies CSV+Taproot
+    /// are active on the target chain at startup (one-time hard fail, no polling).
+    #[arg(long, env = "BONDING_ENABLED", default_value_t = false)]
+    bonding_enabled: bool,
+
+    /// JKC JSON-RPC URL for the one-time startup capability check.
+    /// e.g. "http://127.0.0.1:9771". Only used when --bonding-enabled is true.
+    /// Credentials are read from JKC_RPC_USER and JKC_RPC_PASS env vars.
+    #[arg(long, env = "JKC_RPC_URL")]
+    jkc_rpc_url: Option<String>,
 }
 
 #[tokio::main]
@@ -126,6 +137,26 @@ async fn main() -> Result<()> {
     info!("Min Fee:      {} sats", cli.min_execution_fee);
     info!("Fee Collector: {:?}", cli.fee_collector);
     info!("============================================================");
+
+    // One-time startup assertion: if bonding is enabled, verify CSV+Taproot
+    // are active on the target JKC chain. Hard fail — no polling, no fallback.
+    if cli.bonding_enabled {
+        let rpc_url = cli.jkc_rpc_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Bonding is enabled (--bonding-enabled) but no JKC RPC URL provided. \
+                 Set --jkc-rpc-url or JKC_RPC_URL env var to the JKC daemon JSON-RPC endpoint."
+            )
+        })?;
+        info!("[Bonding] Checking chain capabilities at {} (one-time startup check)...", rpc_url);
+        let status = utxo_vmd::consensus::l1_scripts::query_softfork_status(rpc_url)
+            .await
+            .context("Failed to query JKC chain capabilities")?;
+        info!("[Bonding] CSV={}, SegWit={}, Taproot={}",
+            status.csv_active, status.segwit_active, status.taproot_active);
+        utxo_vmd::consensus::l1_scripts::assert_chain_supports_bonding(&status)
+            .context("Chain capability check failed — bonding disabled")?;
+        info!("[Bonding] Chain supports CSV+Taproot — bonding enabled.");
+    }
 
     // Create database parent directories if needed
     if let Some(parent) = cli.db_path.parent() {

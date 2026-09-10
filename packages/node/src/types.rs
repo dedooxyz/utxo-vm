@@ -98,3 +98,41 @@ pub struct EquivocationProof {
     pub detected_at: i64,
 }
 
+/// The quorum-winning result for a (chain, height) pair.
+/// This is the canonical artifact that all honest operators must agree on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuorumResult {
+    pub chain: String,
+    pub block_height: u64,
+    /// The state_root supported by the quorum
+    pub state_root: String,
+    /// The block_hash supported by the quorum
+    pub block_hash: String,
+    /// Attestations that support this state_root
+    pub supporting_attestations: Vec<StateAttestation>,
+    /// Merkle root over the supporting attestations
+    pub merkle_root: String,
+    /// Number of attestations supporting this root
+    pub support_count: usize,
+    /// Quorum threshold (minimum attestations needed)
+    pub quorum_threshold: usize,
+}
+
+/// Proof that a bonded operator's claimed execution result differs from
+/// the result supported by the quorum. This is the quorum-divergence
+/// fraud proof — the evidence a challenger submits to slash the operator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuorumDivergenceProof {
+    pub chain: String,
+    pub block_height: u64,
+    /// The operator's own attestation (claims a different root)
+    pub operator_attestation: StateAttestation,
+    /// The quorum-winning state_root
+    pub quorum_result_root: String,
+    /// Attestations supporting the quorum result
+    pub supporting_attestations: Vec<StateAttestation>,
+    /// Merkle root over the supporting attestations
+    pub merkle_root: String,
+    pub detected_at: i64,
+}
+

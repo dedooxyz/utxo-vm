@@ -402,3 +402,100 @@ fn test_fuel_exhaustion_no_state_write() {
     assert_eq!(original_state.state_data, b"{\"counter\":0}",
         "Original state_data must not be mutated after fuel exhaustion");
 }
+
+/// Regression test: SIMD/relaxed-SIMD must be rejected by the deterministic runtime config.
+///
+/// Before the determinism hardening (wasm_simd(false), wasm_relaxed_simd(false)),
+/// a module using v128 instructions would instantiate successfully — but could
+/// produce platform-dependent results on x86 vs ARM. After the fix, the engine
+/// must refuse to compile/instantiate any module that uses SIMD instructions.
+///
+/// This test constructs a minimal WAT module with a v128.const instruction
+/// and asserts that Module::new fails (or instantiate fails) with the
+/// determinism-hardened config.
+#[test]
+fn test_simd_rejected_by_deterministic_config() {
+    // Minimal module that uses a v128 (SIMD) instruction.
+    // Before the fix: this compiles and instantiates.
+    // After the fix: Module::new fails because SIMD is disabled.
+    let simd_wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "call") (param i32 i32 i32) (result i32)
+                ;; v128.const is a SIMD instruction — requires wasm_simd enabled
+                (drop (v128.const i32x4 0 0 0 0))
+                (i32.const 0)
+            )
+            (func (export "get_state") (param i32) (result i32)
+                (i32.const 0)
+            )
+        )
+    "#;
+
+    let wasm_bytes = wat::parse_str(simd_wat).expect("Failed to parse SIMD WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+
+    let state = SmartObjectState {
+        object_id: "obj_simd_test".to_string(),
+        code_hash: String::new(), // skip hash check for this test
+        seal: SingleUseSeal {
+            txid: "simdtest".to_string(),
+            vout: 0,
+        },
+        satoshis: 1000,
+        owner_pubkey: "simd_tester".to_string(),
+        state_data: vec![],
+    };
+
+    let result = runtime.execute(&wasm_bytes, &state, "simd_tester".to_string(), "test", b"");
+
+    // The module must be REJECTED — SIMD is disabled for determinism.
+    assert!(result.is_err(),
+        "SIMD module must be rejected by the determinism-hardened runtime config");
+    let err = result.unwrap_err();
+    // Wasmtime reports SIMD disabled as a validation/compilation error.
+    assert!(
+        err.to_lowercase().contains("simd")
+            || err.to_lowercase().contains("v128")
+            || err.to_lowercase().contains("disabled")
+            || err.to_lowercase().contains("not supported")
+            || err.to_lowercase().contains("unknown opcode")
+            || err.to_lowercase().contains("validation")
+            || err.to_lowercase().contains("compilation"),
+        "Error should indicate SIMD rejection, got: {}", err
+    );
+}
+
+/// Test: runtime version reflects the pinned Wasmtime version, not a stale hardcoded string.
+#[test]
+fn test_runtime_version_uses_pinned_wasmtime() {
+    let v = VmRuntime::version();
+    // Must NOT be the old stale "18.0.2" string.
+    assert_ne!(v.wasmtime_version, "18.0.2",
+        "wasmtime_version must reflect the pinned version, not the old hardcoded 18.0.2");
+    // Must be the version pinned in Cargo.toml (=18.0.4).
+    assert_eq!(v.wasmtime_version, "18.0.4",
+        "wasmtime_version must match the pinned Cargo.toml version");
+    assert!(!v.runtime_hash.is_empty(), "runtime_hash must be non-empty");
+}
+
+/// Test: runtime hash changes when Wasmtime version changes.
+/// Two nodes running different Wasmtime builds must produce different runtime hashes.
+#[test]
+fn test_runtime_hash_incorporates_wasmtime_version() {
+    let hash = VmRuntime::calculate_runtime_hash();
+    // The hash is SHA256("utxo-core-vm:<crate_version>:wasmtime:<wasmtime_version>")
+    // If we change the wasmtime version, the hash must change.
+    // We verify this by checking the hash is deterministic for the current version
+    // and that it's different from a hash computed with a different version prefix.
+    use sha2::{Digest, Sha256};
+    let mut hasher_old = Sha256::new();
+    hasher_old.update(b"utxo-core-vm:");
+    hasher_old.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher_old.update(b":wasmtime:18.0.2");
+    let hash_old = hex::encode(hasher_old.finalize());
+
+    assert_ne!(hash, hash_old,
+        "Runtime hash must differ when Wasmtime version differs — \
+         this ensures nodes running mismatched Wasmtime builds are detected");
+}

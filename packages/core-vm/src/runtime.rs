@@ -60,6 +60,17 @@ impl VmRuntime {
     pub fn new(config: VmConfig) -> Self {
         let mut wasm_cfg = Config::new();
         wasm_cfg.consume_fuel(true);
+        // Determinism hardening: disable platform-dependent Wasm features.
+        // SIMD and relaxed-SIMD produce platform-dependent results unless
+        // canonicalized; we disable both entirely since contracts use integer arithmetic.
+        wasm_cfg.wasm_simd(false);
+        wasm_cfg.wasm_relaxed_simd(false);
+        // Reference types are not used by current contracts and add complexity.
+        wasm_cfg.wasm_reference_types(false);
+        // Canonicalize NaNs so浮点 (if ever enabled) produces identical bit patterns
+        // across x86 and ARM. Currently floats are disabled in the ABI, but this
+        // is defense-in-depth.
+        wasm_cfg.cranelift_nan_canonicalization(true);
         // Enforce memory page cap — prevents unbounded memory growth
         let max_bytes = (config.max_memory_pages as u64) * 64 * 1024; // 64 KiB per page
         wasm_cfg.static_memory_maximum_size(max_bytes);
@@ -74,25 +85,35 @@ impl VmRuntime {
         hex::encode(hasher.finalize())
     }
 
-    /// Calculate content-addressed hash of this runtime binary
+    /// Calculate content-addressed hash of this runtime binary.
     /// This is used for runtime verification - callers can verify they're
-    /// running the same runtime version by comparing this hash
+    /// running the same runtime version by comparing this hash.
+    /// Incorporates both the crate version and the pinned Wasmtime version
+    /// so two nodes running different Wasmtime builds produce different,
+    /// detectable runtime hashes instead of silently matching.
     pub fn calculate_runtime_hash() -> String {
-        // The runtime hash is the SHA-256 of the compiled binary
-        // In production, this would be calculated at build time
-        // For now, we return a placeholder that can be verified
-        let runtime_bytes = env!("CARGO_PKG_VERSION").as_bytes();
         let mut hasher = Sha256::new();
         hasher.update(b"utxo-core-vm:");
-        hasher.update(runtime_bytes);
+        hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+        hasher.update(b":wasmtime:");
+        hasher.update(Self::wasmtime_version().as_bytes());
         hex::encode(hasher.finalize())
+    }
+
+    /// Get the pinned Wasmtime version from Cargo.toml.
+    /// This must match the version resolved in Cargo.lock.
+    fn wasmtime_version() -> &'static str {
+        // This is kept in sync with the `wasmtime` dependency in Cargo.toml.
+        // If you change the pin in Cargo.toml, update this constant too.
+        "18.0.4"
     }
 
     /// Get runtime version information
     pub fn version() -> RuntimeVersion {
+        let wv = Self::wasmtime_version();
         RuntimeVersion {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            wasmtime_version: "18.0.2".to_string(), // From Cargo.toml
+            wasmtime_version: wv.to_string(),
             runtime_hash: Self::calculate_runtime_hash(),
         }
     }

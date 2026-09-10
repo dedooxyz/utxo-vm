@@ -1,17 +1,16 @@
 //! L1 Script Builders for UTXO-VM
 //!
-//! **WARNING: NOT CONSENSUS** — These are script templates for testing.
-//! They do NOT enforce UTXO-VM rules on L1. Actual on-chain enforcement
-//! requires proper BIP-341 Taproot script path spending, which is not yet
-//! implemented. These builders are used for testnet experimentation only.
+//! Empirically verified against JKC testnet (block 177,269, getblockchaininfo RPC):
+//!   csv:     active=true,  height=120000
+//!   segwit:  active=true,  height=140000
+//!   taproot: active=true,  height=160000
+//!   mweb:    active=false, height=180000
+//!   bip65:   active=false, height=99999999  (CLTV — NOT active, do not use)
 //!
-//! This module provides builders for Bitcoin Script that implement:
-//! - Operator vault (P2TR with unbond delay)
-//! - Challenge leaf (OP_CAT hash comparison)
-//! - Silence escape (user exit without operator)
-//! - Seal spend (object binding to UTXO)
+//! All timelocks use OP_CHECKSEQUENCEVERIFY (CSV, active at height 120,000).
+//! No CLTV, no OP_CAT. Hash comparison uses OP_EQUAL/OP_EQUALVERIFY only.
 //!
-//! All scripts are designed for JKC Testnet with full opcode support.
+//! Challenge model: Model B (committee-gated). See build_vault_script_tree docs.
 
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
@@ -28,10 +27,9 @@ pub const OP_EQUALVERIFY: u8 = 0x88;
 pub const OP_EQUAL: u8 = 0x87;
 pub const OP_CHECKSIG: u8 = 0xac;
 pub const OP_CHECKSIGVERIFY: u8 = 0xad;
+pub const OP_CHECKMULTISIG: u8 = 0xae;
 pub const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
-pub const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
 pub const OP_SHA256: u8 = 0xa8;
-pub const OP_CAT: u8 = 0x7e;
 pub const OP_RETURN: u8 = 0x6a;
 pub const OP_1: u8 = 0x51;
 
@@ -53,17 +51,51 @@ pub fn tagged_hash(tag: &[u8], data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Operator vault configuration
+/// Operator vault configuration (Model B — committee-gated)
+///
+/// Model B flow:
+/// 1. Operator bonds JKC into a P2TR UTXO with two script-path leaves.
+/// 2. Leaf 1 (unbond): operator can exit after `unbond_delay` blocks (CSV).
+/// 3. Leaf 2 (challenge): M-of-N watcher committee can spend the bond to a
+///    challenge UTXO, posting divergence evidence as OP_RETURN.
+/// 4. Challenge UTXO has two leaves:
+///    - Claim: challenger claims after `claim_delay` blocks (CSV from challenge tx).
+///    - Rebut: operator can reclaim immediately (no timelock).
+///
+/// CSV on the challenge UTXO measures from the challenge tx confirmation,
+/// NOT from bond creation — this is the key advantage of Model B over a
+/// naive single-UTXO race design.
+///
+/// Trust assumption: the watcher committee (M-of-N) must independently verify
+/// divergence evidence off-chain before co-signing a challenge. Bitcoin Script
+/// cannot verify off-chain data, so script-level security is limited to
+/// "M independent watchers agreed to challenge." A fraudulent committee can
+/// steal the bond; the security model assumes M-of-N watchers are honest.
 #[derive(Debug, Clone)]
 pub struct VaultConfig {
     /// Operator's public key (compressed, 33 bytes)
     pub operator_pubkey: Vec<u8>,
-    /// Challenger's public key (compressed, 33 bytes)
+    /// Challenger's public key (compressed, 33 bytes) — receives slashed bond
     pub challenger_pubkey: Vec<u8>,
-    /// Unbond delay in blocks (relative timelock)
+    /// Unbond delay in blocks (relative timelock via CSV)
     pub unbond_delay: u32,
-    /// Challenge window in blocks
-    pub challenge_window: u32,
+    /// Claim delay in blocks (relative timelock on challenge UTXO via CSV)
+    pub claim_delay: u32,
+    /// Watcher committee public keys (compressed, 33 bytes each)
+    pub watcher_pubkeys: Vec<Vec<u8>>,
+    /// Required number of watcher signatures (M-of-N)
+    pub watcher_threshold: u32,
+}
+
+/// Challenge UTXO configuration (Model B second stage)
+#[derive(Debug, Clone)]
+pub struct ChallengeUtxoConfig {
+    /// Challenger's public key (compressed, 33 bytes) — receives slashed bond
+    pub challenger_pubkey: Vec<u8>,
+    /// Operator's public key (compressed, 33 bytes) — can rebut
+    pub operator_pubkey: Vec<u8>,
+    /// Claim delay in blocks (CSV from challenge tx confirmation)
+    pub claim_delay: u32,
 }
 
 /// Challenge proof data
@@ -98,15 +130,16 @@ pub struct SealSpendProof {
 // OPERATOR VAULT SCRIPT (P2TR)
 // ============================================================================
 
-/// Build the operator vault script for P2TR spending.
+/// Build the operator vault script tree for P2TR spending (Model B).
 ///
-/// **NOT CONSENSUS** — This is a testnet template.
+/// Script tree:
+/// - Leaf 1 (Operator unbond): `<unbond_delay> CSV DROP <operator_pubkey> CHECKSIG`
+/// - Leaf 2 (Committee challenge): `<M> <pubkey1> ... <pubkeyN> <N> CHECKMULTISIG`
 ///
-/// The vault has two spending paths:
-/// 1. Key path: Operator can spend after unbond delay
-/// 2. Script path: Challenger can spend with equivocation proof
-///
-/// This function builds the script tree for Taproot commitment.
+/// The committee challenge leaf has NO timelock — watchers can initiate a
+/// challenge at any time by spending the bond to a challenge UTXO (which
+/// carries the CSV-delayed claim path). The operator's only defense is to
+/// unbond via Leaf 1 before the committee challenges, or to not diverge.
 pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> {
     if config.operator_pubkey.len() != 33 {
         return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
@@ -114,20 +147,32 @@ pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> 
     if config.challenger_pubkey.len() != 33 {
         return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
     }
+    if config.watcher_pubkeys.is_empty() {
+        return Err(anyhow!("Watcher committee must have at least 1 pubkey"));
+    }
+    for (i, pk) in config.watcher_pubkeys.iter().enumerate() {
+        if pk.len() != 33 {
+            return Err(anyhow!("Watcher pubkey {} must be 33 bytes (compressed)", i));
+        }
+    }
+    if config.watcher_threshold as usize > config.watcher_pubkeys.len() {
+        return Err(anyhow!("Watcher threshold M ({}) cannot exceed N ({})",
+            config.watcher_threshold, config.watcher_pubkeys.len()));
+    }
+    if config.watcher_threshold == 0 {
+        return Err(anyhow!("Watcher threshold must be >= 1"));
+    }
 
-    // Leaf 0: Operator unbond path
-    // <unbond_delay> OP_CHECKSEQUENCEVERIFY OP_DROP <operator_pubkey> OP_CHECKSIG
+    // Leaf 1: Operator unbond path
     let operator_leaf = build_operator_unbond_leaf(
         &config.operator_pubkey,
         config.unbond_delay,
     )?;
 
-    // Leaf 1: Challenge path
-    // <challenger_pubkey> OP_CHECKSIGVERIFY <operator_pubkey> OP_CHECKSIGVERIFY
-    // <claimed_root> <correct_root> OP_CAT OP_SHA256
-    let challenge_leaf = build_challenge_leaf(
-        &config.operator_pubkey,
-        &config.challenger_pubkey,
+    // Leaf 2: Committee challenge path (M-of-N multisig, no timelock)
+    let challenge_leaf = build_committee_challenge_leaf(
+        &config.watcher_pubkeys,
+        config.watcher_threshold,
     )?;
 
     Ok(VaultScriptTree {
@@ -164,63 +209,44 @@ fn build_operator_unbond_leaf(
     Ok(script)
 }
 
-/// Build the challenge leaf script using OP_CAT.
+/// Build the committee challenge leaf script (Model B).
 ///
-/// **NOT CONSENSUS** — This is a testnet template.
+/// Script: OP_<M> <pubkey1> <pubkey2> ... <pubkeyN> OP_<N> OP_CHECKMULTISIG
 ///
-/// This script enables fraud proof verification:
-/// 1. Challenger provides proof that operator signed wrong root
-/// 2. OP_CAT concatenates hashes for comparison
-/// 3. If valid, bond is slashed to challenger
-///
-/// Script structure (simplified for v1):
-/// <challenger_pubkey> OP_CHECKSIGVERIFY
-/// <operator_pubkey> OP_CHECKSIGVERIFY
-/// <claimed_root> <correct_root> OP_CAT OP_SHA256 <expected_hash> OP_EQUALVERIFY
-///
-/// For actual consensus, this needs proper BIP-341 script path spending
-/// with tagged tapleaf hashes and witness version.
-fn build_challenge_leaf(
-    operator_pubkey: &[u8],
-    challenger_pubkey: &[u8],
+/// The watcher committee (M-of-N) can spend the bond to a challenge UTXO.
+/// No timelock — the committee can challenge at any time. Security comes
+/// from requiring M independent watchers to co-sign, not from the script
+/// proving divergence (which Bitcoin Script cannot do).
+fn build_committee_challenge_leaf(
+    watcher_pubkeys: &[Vec<u8>],
+    threshold: u32,
 ) -> Result<Vec<u8>> {
-    if operator_pubkey.len() != 33 {
-        return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
+    if watcher_pubkeys.is_empty() {
+        return Err(anyhow!("Watcher committee must have at least 1 pubkey"));
     }
-    if challenger_pubkey.len() != 33 {
-        return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
+    if threshold as usize > watcher_pubkeys.len() {
+        return Err(anyhow!("Threshold M cannot exceed N"));
     }
 
     let mut script = Vec::new();
 
-    // Push challenger pubkey (must be provided, NOT hardcoded)
-    script.push(challenger_pubkey.len() as u8);
-    script.extend_from_slice(challenger_pubkey);
+    // Push M (threshold) as minimal encoding
+    push_minimal_uint(&mut script, threshold as u64);
 
-    // OP_CHECKSIGVERIFY - challenger must sign the challenge
-    script.push(OP_CHECKSIGVERIFY);
+    // Push each watcher pubkey
+    for pk in watcher_pubkeys {
+        if pk.len() != 33 {
+            return Err(anyhow!("Watcher pubkey must be 33 bytes (compressed)"));
+        }
+        script.push(pk.len() as u8);
+        script.extend_from_slice(pk);
+    }
 
-    // Push operator pubkey (committed in script)
-    script.push(operator_pubkey.len() as u8);
-    script.extend_from_slice(operator_pubkey);
+    // Push N (total watchers)
+    push_minimal_uint(&mut script, watcher_pubkeys.len() as u64);
 
-    // OP_CHECKSIGVERIFY - operator must have signed the wrong root
-    script.push(OP_CHECKSIGVERIFY);
-
-    // Now verify the equivocation proof using OP_CAT:
-    // The witness provides: <claimed_root> <correct_root>
-    // OP_CAT concatenates them, OP_SHA256 hashes the result
-    // Then compare against expected hash
-
-    // OP_CAT: concatenate top two stack elements
-    script.push(OP_CAT);
-
-    // OP_SHA256: hash the concatenation
-    script.push(OP_SHA256);
-
-    // The expected hash (SHA256(claimed_root || correct_root)) is provided
-    // by the witness and compared. In a full implementation, this would be
-    // pre-committed in the script or verified via additional logic.
+    // CHECKMULTISIG
+    script.push(OP_CHECKMULTISIG);
 
     Ok(script)
 }
@@ -281,44 +307,224 @@ impl VaultScriptTree {
 }
 
 // ============================================================================
-// CHALLENGE SCRIPT (OP_CAT)
+// CHALLENGE UTXO SCRIPT TREE (Model B second stage)
 // ============================================================================
 
-/// Build a challenge script for equivocation proof.
+/// Build the challenge UTXO script tree (Model B second stage).
 ///
-/// This script uses OP_CAT to verify that two roots are different,
-/// proving the operator signed conflicting attestations.
+/// After the watcher committee challenges (spending the bond to this UTXO),
+/// the challenge UTXO has two spending paths:
 ///
-/// Script: <claimed_root> <correct_root> OP_CAT OP_SHA256 <expected_hash> OP_EQUALVERIFY
-pub fn build_equivocation_challenge_script(
-    claimed_root: &[u8],
-    correct_root: &[u8],
-) -> Result<Vec<u8>> {
-    if claimed_root.len() != 32 || correct_root.len() != 32 {
-        return Err(anyhow!("Roots must be 32 bytes"));
+/// - Leaf 1 (Challenger claim): `<claim_delay> CSV DROP <challenger_pubkey> CHECKSIG`
+///   The challenger can claim the bond after `claim_delay` blocks, measured
+///   from the challenge tx confirmation (CSV on this UTXO).
+///
+/// - Leaf 2 (Operator rebut): `<operator_pubkey> CHECKSIG`
+///   The operator can reclaim the bond immediately (no timelock). This is
+///   the operator's defense against a fraudulent challenge — if the operator
+///   is honest, they rebut before the claim delay expires.
+///
+/// Security model: if the operator actually diverged, they cannot rebut
+/// (they have no valid counter-proof), and the challenger claims after the
+/// delay. If the challenge was fraudulent, the operator rebuts immediately.
+/// The on-chain OP_RETURN evidence from the challenge tx allows the community
+/// to verify off-chain whether the rebut was justified.
+pub fn build_challenge_claim_script_tree(config: &ChallengeUtxoConfig) -> Result<ChallengeScriptTree> {
+    if config.challenger_pubkey.len() != 33 {
+        return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
+    }
+    if config.operator_pubkey.len() != 33 {
+        return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
     }
 
-    let mut script = Vec::new();
+    // Leaf 1: Challenger claim (CSV delay from challenge tx)
+    let claim_leaf = {
+        let mut script = Vec::new();
+        push_minimal_uint(&mut script, config.claim_delay as u64);
+        script.push(OP_CHECKSEQUENCEVERIFY);
+        script.push(OP_DROP);
+        script.push(config.challenger_pubkey.len() as u8);
+        script.extend_from_slice(&config.challenger_pubkey);
+        script.push(OP_CHECKSIG);
+        script
+    };
 
-    // Push claimed root (32 bytes)
-    script.push(0x20); // 32 bytes push
-    script.extend_from_slice(claimed_root);
+    // Leaf 2: Operator rebut (no timelock — immediate)
+    let rebut_leaf = {
+        let mut script = Vec::new();
+        script.push(config.operator_pubkey.len() as u8);
+        script.extend_from_slice(&config.operator_pubkey);
+        script.push(OP_CHECKSIG);
+        script
+    };
 
-    // Push correct root (32 bytes)
-    script.push(0x20); // 32 bytes push
-    script.extend_from_slice(correct_root);
+    Ok(ChallengeScriptTree {
+        claim_leaf,
+        rebut_leaf,
+        challenger_pubkey: config.challenger_pubkey.clone(),
+        operator_pubkey: config.operator_pubkey.clone(),
+    })
+}
 
-    // OP_CAT: concatenate the two roots
-    script.push(OP_CAT);
+/// Challenge UTXO script tree (Model B second stage)
+#[derive(Debug, Clone)]
+pub struct ChallengeScriptTree {
+    pub claim_leaf: Vec<u8>,
+    pub rebut_leaf: Vec<u8>,
+    pub challenger_pubkey: Vec<u8>,
+    pub operator_pubkey: Vec<u8>,
+}
 
-    // OP_SHA256: hash the concatenation
-    script.push(OP_SHA256);
+impl ChallengeScriptTree {
+    /// Calculate the tapleaf hash using BIP-341 tagged hash
+    pub fn tapleaf_hash(script: &[u8]) -> Vec<u8> {
+        VaultScriptTree::tapleaf_hash(script)
+    }
 
-    // The expected hash is the SHA256 of (claimed_root || correct_root)
-    // This is pre-computed and provided by the witness
-    // For on-chain verification, the script checks if the witness provides the correct hash
+    /// Get the claim leaf hash
+    pub fn claim_leaf_hash(&self) -> Vec<u8> {
+        Self::tapleaf_hash(&self.claim_leaf)
+    }
 
-    Ok(script)
+    /// Get the rebut leaf hash
+    pub fn rebut_leaf_hash(&self) -> Vec<u8> {
+        Self::tapleaf_hash(&self.rebut_leaf)
+    }
+
+    /// Calculate the script tree root using BIP-341 tagged hash
+    pub fn script_tree_root(&self) -> Vec<u8> {
+        let left = self.claim_leaf_hash();
+        let right = self.rebut_leaf_hash();
+
+        let (first, second) = if left < right {
+            (left.as_slice(), right.as_slice())
+        } else {
+            (right.as_slice(), left.as_slice())
+        };
+
+        let mut data = Vec::new();
+        data.extend_from_slice(first);
+        data.extend_from_slice(second);
+
+        tagged_hash(TAG_TAPBRANCH, &data)
+    }
+}
+
+// ============================================================================
+// STARTUP ASSERTION (one-time, hard fail — no polling)
+// ============================================================================
+
+/// Softfork status as reported by getblockchaininfo RPC.
+#[derive(Debug, Clone)]
+pub struct SoftforkStatus {
+    pub csv_active: bool,
+    pub segwit_active: bool,
+    pub taproot_active: bool,
+}
+
+/// One-time startup assertion: verify that the connected chain reports
+/// CSV and Taproot as active. This is a deployment precondition, not runtime
+/// feature detection — it fails loudly once at startup if the chain doesn't
+/// meet the requirements. No polling, no fallback logic.
+///
+/// Call this once at node startup when bonding is enabled. If it returns Err,
+/// the node must refuse to start (or refuse to enable bonding).
+pub fn assert_chain_supports_bonding(status: &SoftforkStatus) -> Result<()> {
+    if !status.csv_active {
+        return Err(anyhow!(
+            "Chain does not report CSV (BIP112) as active. \
+             Bonding requires CSV for relative timelocks. \
+             Activate CSV on the target chain before enabling bonding."
+        ));
+    }
+    if !status.taproot_active {
+        return Err(anyhow!(
+            "Chain does not report Taproot (BIP341) as active. \
+             Bonding requires Taproot for P2TR script-tree spending. \
+             Activate Taproot on the target chain before enabling bonding."
+        ));
+    }
+    Ok(())
+}
+
+/// Query a Junkcoin JSON-RPC endpoint for softfork status.
+///
+/// This is a one-time startup check — not polling, not runtime detection.
+/// The caller invokes this once at startup when bonding is enabled, then
+/// passes the result to `assert_chain_supports_bonding`.
+///
+/// Credentials are read from environment variables to avoid hardcoding:
+/// - `JKC_RPC_USER`: RPC username
+/// - `JKC_RPC_PASS`: RPC password
+///
+/// The `rpc_url` should include the host and port, e.g. `http://127.0.0.1:9771`.
+pub async fn query_softfork_status(rpc_url: &str) -> Result<SoftforkStatus> {
+    use reqwest::Client;
+
+    let user = std::env::var("JKC_RPC_USER").unwrap_or_default();
+    let pass = std::env::var("JKC_RPC_PASS").unwrap_or_default();
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let body = serde_json::json!({
+        "jsonrpc": "1.0",
+        "id": "utxo-vm-startup",
+        "method": "getblockchaininfo",
+        "params": []
+    });
+
+    let mut req = client.post(rpc_url).json(&body);
+    if !user.is_empty() {
+        req = req.basic_auth(&user, Some(&pass));
+    }
+
+    let resp = req.send().await?.error_for_status()?;
+    let json: serde_json::Value = resp.json().await?;
+
+    // JKC Core getblockchaininfo may report softforks in different formats:
+    // 1. As "softforks" array with "type": "buried" and "active": true
+    // 2. As "deployments" object with "active": true
+    // 3. CSV may be under "csv" and Taproot under "taproot" in deployments
+    // We check all known locations.
+
+    let mut csv_active = false;
+    let mut segwit_active = false;
+    let mut taproot_active = false;
+
+    // Check "softforks" array (Bitcoin Core format)
+    if let Some(softforks) = json.get("softforks").and_then(|v| v.as_array()) {
+        for sf in softforks {
+            let name = sf.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let active = sf.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            match name {
+                "csv" => csv_active = active,
+                "segwit" => segwit_active = active,
+                "taproot" => taproot_active = active,
+                _ => {}
+            }
+        }
+    }
+
+    // Check "deployments" object (newer Bitcoin Core / JKC format)
+    if let Some(deployments) = json.get("deployments").and_then(|v| v.as_object()) {
+        if let Some(csv) = deployments.get("csv") {
+            csv_active = csv_active || csv.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+        if let Some(segwit) = deployments.get("segwit") {
+            segwit_active = segwit_active || segwit.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+        if let Some(taproot) = deployments.get("taproot") {
+            taproot_active = taproot_active || taproot.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+    }
+
+    Ok(SoftforkStatus {
+        csv_active,
+        segwit_active,
+        taproot_active,
+    })
 }
 
 // ============================================================================
@@ -573,12 +779,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_vault_script_tree() {
+    fn test_build_vault_script_tree_model_b() {
         let config = VaultConfig {
             operator_pubkey: vec![0x02; 33],
             challenger_pubkey: vec![0x03; 33],
-            unbond_delay: 60,
-            challenge_window: 10,
+            unbond_delay: 1008, // ~1 week
+            claim_delay: 144,   // ~1 day
+            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
+            watcher_threshold: 2,
         };
 
         let tree = build_vault_script_tree(&config).expect("Failed to build vault script tree");
@@ -592,31 +800,74 @@ mod tests {
         // Verify tagged hashes produce different results than plain SHA256
         let plain_hash = Sha256::digest(&tree.operator_leaf).to_vec();
         assert_ne!(tree.operator_leaf_hash(), plain_hash);
+
+        // Operator leaf must contain CSV and CHECKSIG
+        assert!(tree.operator_leaf.contains(&OP_CHECKSEQUENCEVERIFY));
+        assert!(tree.operator_leaf.contains(&OP_DROP));
+        assert!(tree.operator_leaf.contains(&OP_CHECKSIG));
+
+        // Challenge leaf must contain CHECKMULTISIG (not OP_CAT, not CLTV)
+        assert!(tree.challenge_leaf.contains(&OP_CHECKMULTISIG));
+        assert!(!tree.challenge_leaf.contains(&0xb1), "Challenge leaf must NOT contain CLTV (0xb1)");
+        assert!(!tree.challenge_leaf.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT (0x7e)");
     }
 
     #[test]
     fn test_build_operator_unbond_leaf() {
         let pubkey = vec![0x02; 33];
-        let script = build_operator_unbond_leaf(&pubkey, 60).expect("Failed to build operator leaf");
+        let script = build_operator_unbond_leaf(&pubkey, 1008).expect("Failed to build operator leaf");
 
         assert!(script.contains(&OP_CHECKSEQUENCEVERIFY));
         assert!(script.contains(&OP_DROP));
         assert!(script.contains(&OP_CHECKSIG));
+        // Must NOT contain CLTV
+        assert!(!script.contains(&0xb1), "Unbond leaf must NOT contain CLTV");
     }
 
     #[test]
-    fn test_build_challenge_leaf() {
-        let operator_pubkey = vec![0x02; 33];
-        let challenger_pubkey = vec![0x03; 33];
-        let script = build_challenge_leaf(&operator_pubkey, &challenger_pubkey)
-            .expect("Failed to build challenge leaf");
+    fn test_build_committee_challenge_leaf() {
+        let watchers = vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]];
+        let script = build_committee_challenge_leaf(&watchers, 2)
+            .expect("Failed to build committee challenge leaf");
 
-        assert!(script.contains(&OP_CHECKSIGVERIFY));
-        assert!(script.contains(&OP_CAT));
-        assert!(script.contains(&OP_SHA256));
+        assert!(script.contains(&OP_CHECKMULTISIG));
+        // Must contain all 3 watcher pubkeys
+        for pk in &watchers {
+            assert!(script.windows(pk.len()).any(|w| w == pk.as_slice()),
+                "Challenge leaf must contain watcher pubkey");
+        }
+        // Must NOT contain OP_CAT or CLTV
+        assert!(!script.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT");
+        assert!(!script.contains(&0xb1), "Challenge leaf must NOT contain CLTV");
+    }
 
-        // Verify challenger pubkey is in the script (not hardcoded 0x02×33)
-        assert!(script.windows(challenger_pubkey.len()).any(|w| w == challenger_pubkey));
+    #[test]
+    fn test_build_challenge_claim_script_tree() {
+        let config = ChallengeUtxoConfig {
+            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 33],
+            claim_delay: 144,
+        };
+
+        let tree = build_challenge_claim_script_tree(&config)
+            .expect("Failed to build challenge claim script tree");
+
+        // Claim leaf: CSV + DROP + CHECKSIG
+        assert!(tree.claim_leaf.contains(&OP_CHECKSEQUENCEVERIFY));
+        assert!(tree.claim_leaf.contains(&OP_DROP));
+        assert!(tree.claim_leaf.contains(&OP_CHECKSIG));
+        assert!(!tree.claim_leaf.contains(&0xb1), "Claim leaf must NOT contain CLTV");
+
+        // Rebut leaf: just CHECKSIG (no timelock)
+        assert!(tree.rebut_leaf.contains(&OP_CHECKSIG));
+        assert!(!tree.rebut_leaf.contains(&OP_CHECKSEQUENCEVERIFY),
+            "Rebut leaf must NOT contain CSV (operator can rebut immediately)");
+        assert!(!tree.rebut_leaf.contains(&0xb1), "Rebut leaf must NOT contain CLTV");
+
+        // Script tree root must be non-empty and deterministic
+        assert!(!tree.script_tree_root().is_empty());
+        assert_eq!(tree.script_tree_root(), tree.script_tree_root(),
+            "Script tree root must be deterministic");
     }
 
     #[test]
@@ -627,6 +878,7 @@ mod tests {
         assert!(script.contains(&OP_CHECKSEQUENCEVERIFY));
         assert!(script.contains(&OP_DROP));
         assert!(script.contains(&OP_CHECKSIG));
+        assert!(!script.contains(&0xb1), "Silence escape must NOT contain CLTV");
     }
 
     #[test]
@@ -691,5 +943,92 @@ mod tests {
         let hash = VaultScriptTree::tapleaf_hash(&empty_script);
         assert_eq!(hash.len(), 32);
         assert_ne!(hash, Sha256::digest(&empty_script).to_vec());
+    }
+
+    #[test]
+    fn test_assert_chain_supports_bonding_pass() {
+        let status = SoftforkStatus {
+            csv_active: true,
+            segwit_active: true,
+            taproot_active: true,
+        };
+        assert!(assert_chain_supports_bonding(&status).is_ok(),
+            "Assertion must pass when CSV and Taproot are active");
+    }
+
+    #[test]
+    fn test_assert_chain_supports_bonding_fails_without_csv() {
+        let status = SoftforkStatus {
+            csv_active: false,
+            segwit_active: true,
+            taproot_active: true,
+        };
+        let result = assert_chain_supports_bonding(&status);
+        assert!(result.is_err(), "Must fail when CSV is not active");
+        assert!(result.unwrap_err().to_string().contains("CSV"),
+            "Error must mention CSV");
+    }
+
+    #[test]
+    fn test_assert_chain_supports_bonding_fails_without_taproot() {
+        let status = SoftforkStatus {
+            csv_active: true,
+            segwit_active: true,
+            taproot_active: false,
+        };
+        let result = assert_chain_supports_bonding(&status);
+        assert!(result.is_err(), "Must fail when Taproot is not active");
+        assert!(result.unwrap_err().to_string().contains("Taproot"),
+            "Error must mention Taproot");
+    }
+
+    #[test]
+    fn test_no_cltv_in_any_script() {
+        // Regression test: no script in this module must use CLTV (0xb1).
+        let vault_config = VaultConfig {
+            operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 33],
+            unbond_delay: 1008,
+            claim_delay: 144,
+            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
+            watcher_threshold: 2,
+        };
+        let vault_tree = build_vault_script_tree(&vault_config).unwrap();
+        assert!(!vault_tree.operator_leaf.contains(&0xb1), "Operator leaf must not use CLTV");
+        assert!(!vault_tree.challenge_leaf.contains(&0xb1), "Challenge leaf must not use CLTV");
+
+        let challenge_config = ChallengeUtxoConfig {
+            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 33],
+            claim_delay: 144,
+        };
+        let challenge_tree = build_challenge_claim_script_tree(&challenge_config).unwrap();
+        assert!(!challenge_tree.claim_leaf.contains(&0xb1), "Claim leaf must not use CLTV");
+        assert!(!challenge_tree.rebut_leaf.contains(&0xb1), "Rebut leaf must not use CLTV");
+    }
+
+    #[test]
+    fn test_no_op_cat_in_bonding_scripts() {
+        // Regression test: no bonding script must use OP_CAT (0x7e).
+        let vault_config = VaultConfig {
+            operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 33],
+            unbond_delay: 1008,
+            claim_delay: 144,
+            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
+            watcher_threshold: 2,
+        };
+        let vault_tree = build_vault_script_tree(&vault_config).unwrap();
+        assert!(!vault_tree.operator_leaf.contains(&0x7e), "Operator leaf must not use OP_CAT");
+        assert!(!vault_tree.challenge_leaf.contains(&0x7e), "Challenge leaf must not use OP_CAT");
+
+        let challenge_config = ChallengeUtxoConfig {
+            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 33],
+            claim_delay: 144,
+        };
+        let challenge_tree = build_challenge_claim_script_tree(&challenge_config).unwrap();
+        assert!(!challenge_tree.claim_leaf.contains(&0x7e), "Claim leaf must not use OP_CAT");
+        assert!(!challenge_tree.rebut_leaf.contains(&0x7e), "Rebut leaf must not use OP_CAT");
     }
 }

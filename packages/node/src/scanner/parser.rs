@@ -186,9 +186,22 @@ mod tests {
 
     #[test]
     fn test_parse_op_return_envelope() {
-        let mut script = vec![0x6a];
+        // Construct a proper OP_RETURN envelope per AGENTS.md §2.1:
+        // OP_RETURN OP_FALSE OP_IF <push "utxovm"> <push 0x01>
+        //   <push "application/json"> <push payload> OP_ENDIF
+        let payload = br#"{"method":"transfer","to":"bob","amount":50}"#;
+        let mut script = vec![0x6a]; // OP_RETURN
+        script.push(0x00); // OP_FALSE
+        script.push(0x63); // OP_IF
+        script.push(0x06); // push 6 bytes
         script.extend_from_slice(b"utxovm");
-        script.extend_from_slice(br#"{"method":"transfer","to":"bob","amount":50}"#);
+        script.push(0x01); // push 1 byte (version)
+        script.push(0x01); // version = 1
+        script.push(0x10); // push 16 bytes (content type)
+        script.extend_from_slice(b"application/json");
+        script.push(payload.len() as u8); // push payload
+        script.extend_from_slice(payload);
+        script.push(0x68); // OP_ENDIF
 
         let env = parse_envelope(&script).expect("Envelope should be parsed");
         assert_eq!(env.protocol, "utxovm");
