@@ -67,7 +67,7 @@ impl FeeDistribution {
         }
     }
 
-    /// Create a fee envelope
+    /// Create a fee envelope using the provided FeeParams
     pub fn create_fee_envelope(
         &mut self,
         total_fee: u64,
@@ -75,9 +75,21 @@ impl FeeDistribution {
         block_height: u64,
         txid: &str,
     ) -> Result<FeeEnvelope> {
-        // Indexer fee is 10% of total fee (minimum 1000 satoshis)
-        let indexer_fee = std::cmp::max(total_fee / 10, 1000);
-        let operator_pool = total_fee - indexer_fee;
+        self.create_fee_envelope_with_params(total_fee, batch_count, block_height, txid, &FeeParams::default())
+    }
+
+    /// Create a fee envelope with explicit FeeParams
+    pub fn create_fee_envelope_with_params(
+        &mut self,
+        total_fee: u64,
+        batch_count: u64,
+        block_height: u64,
+        txid: &str,
+        params: &FeeParams,
+    ) -> Result<FeeEnvelope> {
+        // Use FeeParams for indexer fee calculation (overflow-safe)
+        let indexer_fee = calculate_indexer_fee(params, total_fee);
+        let operator_pool = total_fee.saturating_sub(indexer_fee);
 
         let envelope = FeeEnvelope {
             total_fee,
@@ -116,7 +128,10 @@ impl FeeDistribution {
 
         for operator in &operators {
             let effective_batches = operator.batches_posted.saturating_sub(operator.batches_challenged);
-            let share = (self.pending_fees * effective_batches) / total_effective_batches;
+            // Use checked_mul to avoid overflow; fall back to 0 if overflow
+            let share = (self.pending_fees.checked_mul(effective_batches))
+                .and_then(|v| v.checked_div(total_effective_batches))
+                .unwrap_or(0);
 
             let fee_share = OperatorFeeShare {
                 pubkey: operator.pubkey.clone(),
@@ -234,7 +249,9 @@ pub fn calculate_total_fee(
 
 /// Calculate indexer fee from total
 pub fn calculate_indexer_fee(params: &FeeParams, total_fee: u64) -> u64 {
-    let indexer_fee = (total_fee * params.indexer_fee_pct as u64) / 100;
+    let indexer_fee = (total_fee.checked_mul(params.indexer_fee_pct as u64))
+        .map(|v| v / 100)
+        .unwrap_or(u64::MAX);
     std::cmp::max(indexer_fee, params.min_indexer_fee)
 }
 

@@ -191,11 +191,11 @@ impl CrossChainVerifier {
             arr
         };
 
-        // Parse the object data as value
+        // Parse the object data as value (canonical serialization via to_vec)
         let value = {
             use sha2::{Digest, Sha256};
-            let data_str = proof.object_data.to_string();
-            let hash = Sha256::digest(data_str.as_bytes());
+            let data_bytes = serde_json::to_vec(&proof.object_data).unwrap_or_default();
+            let hash = Sha256::digest(&data_bytes);
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&hash);
             arr

@@ -59,6 +59,7 @@ async fn test_rpc_endpoints_and_merkle_proof() {
         relay,
         rate_limiter: Arc::new(RateLimiter::new(100)),
         bridge_api_key: None,
+        cors_origins: vec![],
     };
 
 

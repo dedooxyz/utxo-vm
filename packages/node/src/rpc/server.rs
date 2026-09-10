@@ -33,6 +33,8 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     /// API key for bridge write endpoints (lock/mint). If None, bridge writes are disabled.
     pub bridge_api_key: Option<String>,
+    /// Allowed CORS origins. If empty, CORS is disabled (deny cross-origin).
+    pub cors_origins: Vec<String>,
 }
 
 /// F1.4: Verify bridge API key from Authorization header.
@@ -142,16 +144,27 @@ async fn rate_limit_middleware(
 }
 
 pub fn create_router(state: AppState) -> Router {
-    // CORS: Allow configured origins or default to same-origin
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::list([
-            "http://localhost:3000".parse().unwrap(),
-            "http://localhost:9773".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
-            "http://127.0.0.1:9773".parse().unwrap(),
-        ]))
-        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
-        .allow_headers([axum::http::header::CONTENT_TYPE]);
+    // CORS: configurable via AppState. If empty, CORS is disabled (deny cross-origin).
+    // Default to localhost-only if not specified.
+    let cors = if state.cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::list([
+                "http://localhost:3000".parse().unwrap(),
+                "http://localhost:9773".parse().unwrap(),
+                "http://127.0.0.1:3000".parse().unwrap(),
+                "http://127.0.0.1:9773".parse().unwrap(),
+            ]))
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_headers([axum::http::header::CONTENT_TYPE])
+    } else {
+        let origins: Vec<_> = state.cors_origins.iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_headers([axum::http::header::CONTENT_TYPE])
+    };
 
     Router::new()
         .route("/api/v1/chain/info", get(get_chain_info))

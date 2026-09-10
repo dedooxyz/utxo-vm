@@ -406,6 +406,34 @@ impl StateStore {
         }
     }
 
+    /// Get all persisted bridge transfers (for rehydrating in-memory cache on startup)
+    pub fn get_all_bridge_transfers(
+        &self,
+    ) -> Result<Vec<crate::cross_chain::bridge::BridgeTransfer>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(BRIDGE_TRANSFERS_TABLE)?;
+        let mut transfers = Vec::new();
+        for item in table.iter()? {
+            let (_, val) = item?;
+            let transfer: crate::cross_chain::bridge::BridgeTransfer =
+                serde_json::from_slice(val.value())?;
+            transfers.push(transfer);
+        }
+        Ok(transfers)
+    }
+
+    /// Get all minted proofs (for rehydrating in-memory cache on startup)
+    pub fn get_all_minted_proofs(&self) -> Result<Vec<(String, String)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(MINTED_PROOFS_TABLE)?;
+        let mut proofs = Vec::new();
+        for item in table.iter()? {
+            let (k, v) = item?;
+            proofs.push((k.value().to_string(), v.value().to_string()));
+        }
+        Ok(proofs)
+    }
+
     // ── Minted proof persistence (replay guard survives restart) ───────────
 
     /// Atomically check whether `object_id` was already minted, and if not,

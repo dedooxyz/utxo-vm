@@ -35,12 +35,16 @@ impl ElectrsClient {
     }
 
     pub fn with_timeout(base_url: String, timeout_secs: u64) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("[Electrs] Failed to build HTTP client with timeout: {} — using default", e);
+                Client::new()
+            });
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .unwrap_or_default(),
+            client,
         }
     }
 

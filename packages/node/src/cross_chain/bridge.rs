@@ -86,12 +86,30 @@ pub struct BridgeManager {
 
 impl BridgeManager {
     pub fn new(verifier: Arc<CrossChainVerifier>, store: StateStore) -> Self {
+        // Rehydrate in-memory caches from StateStore
+        let mut transfers = HashMap::new();
+        let mut minted_objects = HashMap::new();
+
+        if let Ok(persisted_transfers) = store.get_all_bridge_transfers() {
+            for t in persisted_transfers {
+                transfers.insert(t.id.clone(), t);
+            }
+            tracing::info!("[Bridge] Rehydrated {} transfers from StateStore", transfers.len());
+        }
+
+        if let Ok(persisted_proofs) = store.get_all_minted_proofs() {
+            for (obj_id, transfer_id) in persisted_proofs {
+                minted_objects.insert(obj_id, transfer_id);
+            }
+            tracing::info!("[Bridge] Rehydrated {} minted proofs from StateStore", minted_objects.len());
+        }
+
         Self {
             verifier,
             store,
-            transfers: Arc::new(RwLock::new(HashMap::new())),
+            transfers: Arc::new(RwLock::new(transfers)),
             events: Arc::new(RwLock::new(Vec::new())),
-            minted_objects: Arc::new(RwLock::new(HashMap::new())),
+            minted_objects: Arc::new(RwLock::new(minted_objects)),
             transfer_locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -317,6 +335,23 @@ impl BridgeManager {
             return Err(anyhow::anyhow!(
                 "Proof verification failed: {:?}",
                 verification.error
+            ));
+        }
+
+        // Bind proof to transfer: proof must reference the same source object and chain
+        if proof.object_id != transfer.source_object_id {
+            return Err(anyhow::anyhow!(
+                "Proof object_id '{}' does not match transfer source_object_id '{}'. \
+                 Cannot mint a transfer with a proof for a different object.",
+                proof.object_id,
+                transfer.source_object_id,
+            ));
+        }
+        if proof.source_chain != transfer.source_chain {
+            return Err(anyhow::anyhow!(
+                "Proof source_chain '{}' does not match transfer source_chain '{}'.",
+                proof.source_chain,
+                transfer.source_chain,
             ));
         }
 

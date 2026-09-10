@@ -6,6 +6,7 @@ pub const TREE_DEPTH: usize = 256;
 
 fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
+    hasher.update(b"SMT_NODE");
     hasher.update(left);
     hasher.update(right);
     let result = hasher.finalize();
@@ -25,7 +26,14 @@ pub fn hash_leaf(key: &[u8; 32], value: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-/// Sparse Merkle Tree (SMT) with 256-bit keys and values.
+/// Sorted-leaves Merkle tree used as the state commitment structure.
+///
+/// NOTE: Despite the name `SparseMerkleTree`, this is NOT a true 256-bit Sparse Merkle
+/// Tree with fixed-position leaves. It is a sorted-leaves Merkle tree where leaves are
+/// placed in sorted key order and hashed pairwise bottom-up. The root is a function of
+/// the sorted key-value pairs. This provides deterministic state commitments but the
+/// proof format is non-standard compared to true SMT implementations.
+///
 /// The root is cached and only recomputed when leaves change.
 #[derive(Clone, Debug)]
 pub struct SparseMerkleTree {

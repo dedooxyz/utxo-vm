@@ -11,6 +11,28 @@ export interface ChainConfig {
 }
 
 export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
+  JKC_TESTNET: {
+    name: "Junkcoin Testnet",
+    ticker: "tJKC",
+    p2pkhPrefix: 0x6f,
+    p2shPrefix: 0xc4,
+    wifPrefix: 0xef,
+    bech32Prefix: "tjkc",
+    rpcDefaultPort: 9772,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
+  JKC: {
+    name: "Junkcoin",
+    ticker: "JKC",
+    p2pkhPrefix: 0x10,
+    p2shPrefix: 0x05,
+    wifPrefix: 0x90,
+    bech32Prefix: "jkc",
+    rpcDefaultPort: 9772,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
   BTC: {
     name: "Bitcoin",
     ticker: "BTC",
@@ -43,16 +65,6 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     minRelayFee: 100000,
     dustLimit: 100000,
   },
-  JKC: {
-    name: "Junkcoin",
-    ticker: "JKC",
-    p2pkhPrefix: 0x10,
-    p2shPrefix: 0x05,
-    wifPrefix: 0x90,
-    rpcDefaultPort: 9772,
-    minRelayFee: 1000,
-    dustLimit: 1000,
-  },
   BEL: {
     name: "Bells",
     ticker: "BEL",
@@ -63,16 +75,55 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     minRelayFee: 1000,
     dustLimit: 1000,
   },
-  BCH: {
-    name: "Bitcoin Cash",
-    ticker: "BCH",
-    p2pkhPrefix: 0x00,
+  DINGO: {
+    name: "Dingocoin",
+    ticker: "DINGO",
+    p2pkhPrefix: 0x1e,
+    p2shPrefix: 0x16,
+    wifPrefix: 0x9e,
+    rpcDefaultPort: 33982,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
+  SHIC: {
+    name: "Shiba Inu Coin",
+    ticker: "SHIC",
+    p2pkhPrefix: 0x3b,
     p2shPrefix: 0x05,
     wifPrefix: 0x80,
-    bech32Prefix: "bitcoincash",
     rpcDefaultPort: 8332,
     minRelayFee: 1000,
-    dustLimit: 546,
+    dustLimit: 1000,
+  },
+  TRMP: {
+    name: "Trumpcoin",
+    ticker: "TRMP",
+    p2pkhPrefix: 0x3b,
+    p2shPrefix: 0x05,
+    wifPrefix: 0x80,
+    rpcDefaultPort: 8332,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
+  B1T: {
+    name: "Bean Cash",
+    ticker: "B1T",
+    p2pkhPrefix: 0x3b,
+    p2shPrefix: 0x05,
+    wifPrefix: 0x80,
+    rpcDefaultPort: 8332,
+    minRelayFee: 1000,
+    dustLimit: 1000,
+  },
+  CRC: {
+    name: "Crocodile Cash",
+    ticker: "CRC",
+    p2pkhPrefix: 0x3b,
+    p2shPrefix: 0x05,
+    wifPrefix: 0x80,
+    rpcDefaultPort: 8332,
+    minRelayFee: 1000,
+    dustLimit: 1000,
   },
   PEP: {
     name: "Pepecoin",
@@ -106,6 +157,6 @@ export function getChainConfig(tickerOrName: string): ChainConfig {
       return SUPPORTED_CHAINS[key];
     }
   }
-  // Default to BTC
-  return SUPPORTED_CHAINS.BTC;
+  // Default to JKC_TESTNET (per AGENTS.md: JKC_TESTNET is the default settlement layer)
+  return SUPPORTED_CHAINS.JKC_TESTNET;
 }

@@ -90,6 +90,12 @@ struct Cli {
     /// Credentials are read from JKC_RPC_USER and JKC_RPC_PASS env vars.
     #[arg(long, env = "JKC_RPC_URL")]
     jkc_rpc_url: Option<String>,
+
+    /// Comma-separated list of allowed CORS origins for the RPC server.
+    /// If not set, defaults to localhost:3000 and localhost:9773.
+    /// Example: "https://app.utxovm.org,https://explorer.utxovm.org"
+    #[arg(long, env = "CORS_ORIGINS", value_delimiter = ',')]
+    cors_origins: Vec<String>,
 }
 
 #[tokio::main]
@@ -312,6 +318,7 @@ async fn main() -> Result<()> {
         relay,
         rate_limiter: std::sync::Arc::new(utxo_vmd::rpc::server::RateLimiter::new(cli.rate_limit_rps)),
         bridge_api_key: cli.bridge_api_key,
+        cors_origins: cli.cors_origins,
     };
 
     let router = create_router(app_state);

@@ -126,6 +126,14 @@ impl OperatorSet {
             ));
         }
 
+        // Validate pubkey: must be 33-byte compressed secp256k1 (66 hex chars)
+        if pubkey.len() != 66 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(anyhow!(
+                "Invalid operator pubkey: must be 66 hex chars (33-byte compressed secp256k1), got len={}",
+                pubkey.len()
+            ));
+        }
+
         // Check if operator already exists
         if self.operators.iter().any(|op| op.pubkey == pubkey) {
             return Err(anyhow!("Operator already registered"));
@@ -290,8 +298,12 @@ impl OperatorSet {
         if self.total_tvl == 0 {
             return true;
         }
-        // Bond should be at least 10x TVL
-        self.total_bond >= self.total_tvl * 10
+        // Bond should be at least 10x TVL (use checked_mul to avoid overflow)
+        match self.total_tvl.checked_mul(10) {
+            Some(required) => self.total_bond >= required,
+            // Overflow: TVL is so large that 10x exceeds u64 — bond can never be adequate
+            None => false,
+        }
     }
 
     /// Get metrics summary

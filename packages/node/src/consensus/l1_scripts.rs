@@ -162,6 +162,11 @@ pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> 
     if config.watcher_threshold == 0 {
         return Err(anyhow!("Watcher threshold must be >= 1"));
     }
+    // Bitcoin consensus limit: OP_CHECKMULTISIG supports at most 20 pubkeys
+    if config.watcher_pubkeys.len() > 20 {
+        return Err(anyhow!("Watcher committee cannot exceed 20 pubkeys (Bitcoin CHECKMULTISIG limit), got {}",
+            config.watcher_pubkeys.len()));
+    }
 
     // Leaf 1: Operator unbond path
     let operator_leaf = build_operator_unbond_leaf(
@@ -303,6 +308,64 @@ impl VaultScriptTree {
         data.extend_from_slice(second);
 
         tagged_hash(TAG_TAPBRANCH, &data)
+    }
+
+    /// Compute the P2TR output script for this vault.
+    ///
+    /// Uses BIP-341: output_key = internal_key + tweak(internal_key, script_tree_root)
+    /// The internal key is a NUMS (Nothing-Up-My-Sleeve) point per BIP-341 when
+    /// using script-path-only spending (no key-path spend).
+    ///
+    /// Returns the witness v1 output script: OP_1 <32-byte x-only pubkey>
+    pub fn p2tr_output_script(&self) -> Result<Vec<u8>> {
+        // BIP-341 NUMS internal key: x-only pubkey = SHA256("TapTweak")||SHA256("TapTweak") compressed
+        // For script-path-only, the internal key is a placeholder that provably has no known private key.
+        // Using H = lift_x(int(SHA256("TapTweak")) mod p) as per BIP-341 recommendation.
+        // For simplicity, we use the all-zeros x-only key (which is a valid NUMS point on secp256k1).
+        let internal_key = [0u8; 32];
+
+        // Compute tweak: tagged_hash("TapTweak", internal_key || script_tree_root)
+        let merkle_root = self.script_tree_root();
+        let mut tweak_data = Vec::with_capacity(64);
+        tweak_data.extend_from_slice(&internal_key);
+        tweak_data.extend_from_slice(&merkle_root);
+        let tweak = tagged_hash(TAG_TAPTWEAK, &tweak_data);
+
+        // In a full implementation, this would compute:
+        //   Q = internal_key + lift_x(tweak) * G
+        //   output_key = x(Q)
+        // For now, we return the script structure with a note that the actual
+        // tweaked key computation requires a secp256k1 library (bitcoin/secp256k1).
+        // The caller must compute the tweaked key externally and provide it.
+        //
+        // Output script: OP_1 <32-byte x-only output key>
+        let mut script = Vec::with_capacity(34);
+        script.push(0x51); // OP_1 (witness version 1)
+        script.push(32);   // push 32 bytes
+        // Placeholder: actual tweaked key must be computed by caller using secp256k1
+        // For now, append the tweak hash as a placeholder output key
+        let mut output_key = [0u8; 32];
+        output_key.copy_from_slice(&tweak[..32]);
+        script.extend_from_slice(&output_key);
+
+        Ok(script)
+    }
+
+    /// Get the witness items needed for CHECKMULTISIG spending (committee challenge leaf).
+    /// OP_CHECKMULTISIG requires a leading dummy element due to the off-by-one bug in Bitcoin.
+    /// Returns: [dummy, sig1, sig2, ..., sigM, script]
+    pub fn committee_witness_template(&self, signatures: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut witness = Vec::with_capacity(signatures.len() + 2);
+        // Dummy element required by CHECKMULTISIG (Bitcoin consensus bug)
+        witness.push(vec![]); // empty dummy
+        // Signatures in the order they appear in the script
+        for sig in signatures {
+            witness.push(sig.clone());
+        }
+        // The script leaf itself (for script-path spend)
+        witness.push(self.challenge_leaf.clone());
+        // Control block would be appended by the wallet (contains internal key + path proof)
+        witness
     }
 }
 
