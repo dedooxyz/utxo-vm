@@ -94,6 +94,8 @@ impl CrossChainVerifier {
 
     /// Verify quorum (≥2/3 validator attestations for same state root).
     /// F1.3: Fail-closed — if no validators are registered, quorum is never reached.
+    /// Security: dedup by validator_pubkey to prevent counting duplicates.
+    /// Security: only count attestations from known validators.
     fn verify_quorum(&self, proof: &CrossChainProof) -> bool {
         if proof.attestations.is_empty() {
             return false;
@@ -109,18 +111,63 @@ impl CrossChainVerifier {
             return false;
         }
 
-        // Group attestations by state_root
-        let mut root_counts = std::collections::HashMap::new();
+        // Get the set of known validators for membership check
+        let known_validators = match self.consensus.known_validators.read() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::error!("[CrossChain] Failed to read validator set: {}", e);
+                return false;
+            }
+        };
+
+        // Filter: only count attestations from known validators, dedup by pubkey
+        let mut seen_pubkeys = std::collections::HashSet::new();
+        let mut root_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+
         for att in &proof.attestations {
-            *root_counts.entry(&att.state_root).or_insert(0) += 1;
+            // Must be from a known validator
+            if !known_validators.contains(&att.validator_pubkey) {
+                tracing::warn!(
+                    "[CrossChain] Skipping attestation from unknown validator: {}",
+                    att.validator_pubkey
+                );
+                continue;
+            }
+            // Dedup: one attestation per validator per (chain, height)
+            if !seen_pubkeys.insert(att.validator_pubkey.clone()) {
+                tracing::warn!(
+                    "[CrossChain] Skipping duplicate attestation from validator: {}",
+                    att.validator_pubkey
+                );
+                continue;
+            }
+            *root_counts.entry(att.state_root.as_str()).or_insert(0) += 1;
+        }
+
+        if root_counts.is_empty() {
+            return false;
         }
 
         // Find the state_root with most attestations
-        let max_count = root_counts.values().max().unwrap_or(&0);
+        let (winning_root, max_count) = root_counts
+            .into_iter()
+            .max_by(|(root_a, count_a), (root_b, count_b)| {
+                count_a.cmp(count_b).then_with(|| root_a.cmp(root_b))
+            })
+            .unwrap();
+
+        // The winning root must match the proof's source_root
+        if winning_root != proof.source_root {
+            tracing::warn!(
+                "[CrossChain] Quorum root mismatch: winning={} but proof.source_root={}",
+                winning_root, proof.source_root
+            );
+            return false;
+        }
 
         // Check if ≥2/3 quorum
         let required = (total_validators * 2 + 2) / 3; // Ceiling division
-        *max_count >= required
+        max_count >= required
     }
 
     /// Verify Merkle inclusion proof

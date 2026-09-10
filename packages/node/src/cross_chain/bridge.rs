@@ -474,7 +474,12 @@ impl BridgeManager {
     /// P0-follow-up.2: Cancel a pending/locked transfer and reclaim the source object.
     /// Only allowed after RECLAIM_TIMEOUT_SECS have elapsed since lock creation,
     /// and only by the original (unprefixed) owner.
-    pub fn cancel_transfer(&self, transfer_id: &str, caller: &str) -> Result<BridgeTransfer> {
+    pub fn cancel_transfer(
+        &self,
+        transfer_id: &str,
+        caller: &str,
+        signature_hex: &str,
+    ) -> Result<BridgeTransfer> {
         let mut transfer = {
             let transfers = self
                 .transfers
@@ -524,6 +529,28 @@ impl BridgeManager {
                 original_owner,
             ));
         }
+
+        // Verify ECDSA signature: caller must sign "cancel:{transfer_id}" with their key
+        let secp = Secp256k1::new();
+        let pubkey_bytes = hex::decode(original_owner)
+            .map_err(|e| anyhow::anyhow!("Invalid owner pubkey hex: {}", e))?;
+        let pubkey = PublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))?;
+        let sig_bytes = hex::decode(signature_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid signature hex: {}", e))?;
+        let sig = Signature::from_compact(&sig_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid signature format: {}", e))?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"cancel:");
+        hasher.update(transfer_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut msg_arr = [0u8; 32];
+        msg_arr.copy_from_slice(&digest);
+        let msg = Message::from_digest(msg_arr);
+
+        secp.verify_ecdsa(&msg, &sig, &pubkey)
+            .map_err(|_| anyhow::anyhow!("ECDSA signature verification failed for cancel_transfer"))?;
 
         // Unlock the source object
         self.unlock_object(&transfer)?;
@@ -578,6 +605,22 @@ mod tests {
         let message = Message::from_digest(msg_bytes);
         let sig = secp.sign_ecdsa(&message, sk);
         (pk_hex, hex::encode(sig.serialize_compact()))
+    }
+
+    fn sign_cancel_msg(
+        secp: &Secp256k1<secp256k1::All>,
+        sk: &secp256k1::SecretKey,
+        transfer_id: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"cancel:");
+        hasher.update(transfer_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut msg_bytes = [0u8; 32];
+        msg_bytes.copy_from_slice(&digest);
+        let message = Message::from_digest(msg_bytes);
+        let sig = secp.sign_ecdsa(&message, sk);
+        hex::encode(sig.serialize_compact())
     }
 
     #[test]
@@ -893,7 +936,8 @@ mod tests {
             .unwrap();
 
         // Cancel immediately — should fail (timeout not reached)
-        let result = bridge.cancel_transfer(&transfer.id, &pk_hex);
+        let cancel_sig = sign_cancel_msg(&secp, &sk, &transfer.id);
+        let result = bridge.cancel_transfer(&transfer.id, &pk_hex, &cancel_sig);
         assert!(
             result.is_err(),
             "Cancel before timeout must be rejected"
@@ -916,7 +960,8 @@ mod tests {
         }
 
         // Cancel after timeout — should succeed
-        let result = bridge.cancel_transfer(&transfer.id, &pk_hex);
+        let cancel_sig = sign_cancel_msg(&secp, &sk, &transfer.id);
+        let result = bridge.cancel_transfer(&transfer.id, &pk_hex, &cancel_sig);
         assert!(result.is_ok(), "Cancel after timeout should succeed: {:?}", result.err());
 
         // Object must be unlocked

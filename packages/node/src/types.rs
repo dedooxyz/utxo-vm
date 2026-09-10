@@ -51,6 +51,7 @@ pub struct UndoLogRecord {
     pub prev_owner: Option<String>,
     pub prev_state_data: Option<serde_json::Value>,
     pub prev_updated_at_block: Option<u64>,
+    pub prev_created_at_block: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

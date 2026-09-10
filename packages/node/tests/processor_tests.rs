@@ -2,6 +2,32 @@ use utxo_vmd::scanner::electrs::{ElectrsTx, ElectrsTxInput, ElectrsTxOutput};
 use utxo_vmd::scanner::BlockProcessor;
 use utxo_vmd::storage::StateStore;
 
+/// Build a valid utxovm envelope script:
+/// OP_FALSE OP_IF <push "utxovm"> <push 0x01> <push "application/json"> <push payload> OP_ENDIF
+fn build_envelope_script(payload: &[u8]) -> Vec<u8> {
+    let mut script = vec![0x00]; // OP_FALSE
+    script.push(0x63); // OP_IF
+    script.push(0x06); // push 6 bytes
+    script.extend_from_slice(b"utxovm");
+    script.push(0x01); // push 1 byte (version)
+    script.push(0x01); // version = 1
+    script.push(0x10); // push 16 bytes (content type)
+    script.extend_from_slice(b"application/json");
+    // Push payload (handle >75 bytes with PUSHDATA1)
+    if payload.len() < 0x4c {
+        script.push(payload.len() as u8);
+    } else if payload.len() <= 0xff {
+        script.push(0x4c); // PUSHDATA1
+        script.push(payload.len() as u8);
+    } else {
+        script.push(0x4d); // PUSHDATA2
+        script.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    }
+    script.extend_from_slice(payload);
+    script.push(0x68); // OP_ENDIF
+    script
+}
+
 #[test]
 fn test_processor_create_and_call() {
     let temp_dir = tempfile::tempdir().expect("tempdir failed");
@@ -11,11 +37,8 @@ fn test_processor_create_and_call() {
     let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), 0, None);
 
     // 1. Transaction that creates a Smart Object
-    let mut create_script = vec![0x6a];
-    create_script.extend_from_slice(b"utxovm");
-    create_script.extend_from_slice(
-        br#"{"op":"create","code_hash":"wasm_dex_pool","state":{"pool":"JKC/DOGE","liquidity":50000}}"#,
-    );
+    let create_payload = br#"{"op":"create","code_hash":"wasm_default","state":{"pool":"JKC/DOGE","liquidity":50000}}"#;
+    let create_script = build_envelope_script(create_payload);
 
     let tx_create = ElectrsTx {
         txid: "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
@@ -43,11 +66,8 @@ fn test_processor_create_and_call() {
     assert_eq!(obj.seal, "1111111111111111111111111111111111111111111111111111111111111111:0");
 
     // 2. Transaction that spends the seal and calls a method
-    let mut call_script = vec![0x6a];
-    call_script.extend_from_slice(b"utxovm");
-    call_script.extend_from_slice(
-        br#"{"op":"call","method":"swap","args":{"to":"bob_trader","amount":500}}"#,
-    );
+    let call_payload = br#"{"op":"call","method":"swap","args":{"to":"bob_trader","amount":500}}"#;
+    let call_script = build_envelope_script(call_payload);
 
     let tx_call = ElectrsTx {
         txid: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
@@ -91,11 +111,10 @@ fn test_fee_enforcement_with_min_fee() {
     let min_fee = 1000;
     let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), min_fee, None);
 
-    // Transaction with insufficient fee (500 < 1000)
-    let mut create_script = vec![0x6a];
-    create_script.extend_from_slice(b"utxovm");
-    create_script.extend_from_slice(br#"{"op":"create","code_hash":"wasm_token"}"#);
+    let create_payload = br#"{"op":"create","code_hash":"wasm_default"}"#;
+    let create_script = build_envelope_script(create_payload);
 
+    // Transaction with insufficient fee (500 < 1000)
     let tx_no_fee = ElectrsTx {
         txid: "3333333333333333333333333333333333333333333333333333333333333333".to_string(),
         vin: vec![ElectrsTxInput {
@@ -149,9 +168,8 @@ fn test_fee_enforcement_with_collector() {
         Some(fee_collector.clone()),
     );
 
-    let mut create_script = vec![0x6a];
-    create_script.extend_from_slice(b"utxovm");
-    create_script.extend_from_slice(br#"{"op":"create","code_hash":"wasm_token"}"#);
+    let create_payload = br#"{"op":"create","code_hash":"wasm_default"}"#;
+    let create_script = build_envelope_script(create_payload);
 
     // Transaction with fee output to WRONG address in scriptpubkey_asm
     let tx_wrong_collector = ElectrsTx {
@@ -177,9 +195,8 @@ fn test_fee_enforcement_with_collector() {
     assert!(result.is_none(), "Transaction with wrong fee collector should be rejected");
 
     // Transaction WITH fee output to correct collector (scriptpubkey_asm contains the collector)
-    let mut create_script2 = vec![0x6a];
-    create_script2.extend_from_slice(b"utxovm");
-    create_script2.extend_from_slice(br#"{"op":"create","code_hash":"wasm_token2"}"#);
+    let create_payload2 = br#"{"op":"create","code_hash":"wasm_default2"}"#;
+    let create_script2 = build_envelope_script(create_payload2);
 
     let tx_with_collector = ElectrsTx {
         txid: "6666666666666666666666666666666666666666666666666666666666666666".to_string(),

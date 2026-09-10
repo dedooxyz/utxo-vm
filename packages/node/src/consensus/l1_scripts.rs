@@ -702,14 +702,14 @@ pub fn build_indexer_fee_output(
         return Err(anyhow!("Indexer pubkey must be 33 bytes (compressed)"));
     }
 
-    // Simple P2WPKH output
+    // P2WPKH: OP_0 <HASH160(pubkey)> (20 bytes)
     let mut script = Vec::new();
 
     // OP_0 (witness version 0)
     script.push(OP_FALSE);
 
-    // SHA256(indexer_pubkey)
-    let pubkey_hash = Sha256::digest(indexer_pubkey);
+    // HASH160(indexer_pubkey) = RIPEMD160(SHA256(pubkey)) — 20 bytes
+    let pubkey_hash = hash160(indexer_pubkey);
     script.push(pubkey_hash.len() as u8);
     script.extend_from_slice(&pubkey_hash);
 
@@ -742,21 +742,36 @@ fn push_minimal_uint(script: &mut Vec<u8>, value: u64) {
     }
 }
 
-/// Get the compact size encoding for a length.
+/// Get the Bitcoin compact-size encoding for a length.
+/// Per BIP-341, tapleaf hashing uses compact-size (not script push opcodes).
+/// - < 0xfd: single byte
+/// - <= 0xffff: 0xfd || 2 bytes little-endian
+/// - <= 0xffffffff: 0xfe || 4 bytes little-endian
+/// - else: 0xff || 8 bytes little-endian
 fn push_size_compact(len: usize) -> Vec<u8> {
-    if len < 0x4c {
+    if len < 0xfd {
         vec![len as u8]
-    } else if len <= 0xff {
-        vec![0x4c, len as u8]
     } else if len <= 0xffff {
-        vec![0x4d, (len & 0xff) as u8, ((len >> 8) & 0xff) as u8]
-    } else {
+        vec![0xfd, (len & 0xff) as u8, ((len >> 8) & 0xff) as u8]
+    } else if len <= 0xffff_ffff {
         vec![
-            0x4e,
+            0xfe,
             (len & 0xff) as u8,
             ((len >> 8) & 0xff) as u8,
             ((len >> 16) & 0xff) as u8,
             ((len >> 24) & 0xff) as u8,
+        ]
+    } else {
+        vec![
+            0xff,
+            (len & 0xff) as u8,
+            ((len >> 8) & 0xff) as u8,
+            ((len >> 16) & 0xff) as u8,
+            ((len >> 24) & 0xff) as u8,
+            ((len >> 32) & 0xff) as u8,
+            ((len >> 40) & 0xff) as u8,
+            ((len >> 48) & 0xff) as u8,
+            ((len >> 56) & 0xff) as u8,
         ]
     }
 }

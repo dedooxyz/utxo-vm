@@ -21,20 +21,24 @@ pub const OP_CAT: u8 = 0x7e;
 pub fn build_staking_script(validator_pubkey_hex: &str, lock_blocks: u32) -> Result<Vec<u8>> {
     let pubkey_bytes = hex::decode(validator_pubkey_hex)
         .map_err(|e| anyhow!("Invalid validator pubkey hex: {}", e))?;
-    if pubkey_bytes.len() != 33 && pubkey_bytes.len() != 32 {
-        return Err(anyhow!("Invalid pubkey length: expected 32 or 33 bytes"));
+    // AGENTS.md: No 32-byte CHECKSIG keys. Must be 33-byte compressed.
+    if pubkey_bytes.len() != 33 {
+        return Err(anyhow!("Invalid pubkey length: expected 33 bytes (compressed), got {}", pubkey_bytes.len()));
     }
 
     let mut script = Vec::new();
 
-    // Push CSV relative timelock
+    // Push CSV relative timelock using Bitcoin script-num encoding
     let lock_bytes = lock_blocks.to_le_bytes();
-    let compact_lock = if lock_blocks <= 16 {
-        vec![0x50 + lock_blocks as u8]
+    let compact_lock = if lock_blocks == 0 {
+        vec![0x00] // OP_0 for zero
+    } else if lock_blocks <= 16 {
+        vec![0x50 + lock_blocks as u8] // OP_1..OP_16
     } else {
-        let mut b = vec![lock_bytes[0]];
-        if lock_bytes[1] > 0 || lock_bytes[2] > 0 || lock_bytes[3] > 0 {
-            b.push(lock_bytes[1]);
+        // Minimal encoding: strip trailing zero bytes
+        let mut b = lock_bytes.to_vec();
+        while b.len() > 1 && b.last() == Some(&0) {
+            b.pop();
         }
         let mut p = vec![b.len() as u8];
         p.extend_from_slice(&b);
@@ -68,6 +72,13 @@ pub fn build_slashing_script(validator_pubkey_hex: &str, whistleblower_pubkey_he
         .map_err(|e| anyhow!("Invalid validator pubkey hex: {}", e))?;
     let wb_pk = hex::decode(whistleblower_pubkey_hex)
         .map_err(|e| anyhow!("Invalid whistleblower pubkey hex: {}", e))?;
+    // AGENTS.md: No 32-byte CHECKSIG keys. Must be 33-byte compressed.
+    if val_pk.len() != 33 {
+        return Err(anyhow!("Validator pubkey must be 33 bytes (compressed), got {}", val_pk.len()));
+    }
+    if wb_pk.len() != 33 {
+        return Err(anyhow!("Whistleblower pubkey must be 33 bytes (compressed), got {}", wb_pk.len()));
+    }
 
     let mut script = Vec::new();
 

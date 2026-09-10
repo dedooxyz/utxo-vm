@@ -71,13 +71,16 @@ impl StateStore {
     }
 
     pub fn hash_object(obj: &SmartObjectRecord) -> [u8; 32] {
+        // Serialize state_data canonically. serde_json without preserve_order
+        // uses BTreeMap (sorted keys), so to_vec is deterministic.
+        let state_bytes = serde_json::to_vec(&obj.state_data).unwrap_or_default();
         let mut hasher = Sha256::new();
         hasher.update(obj.object_id.as_bytes());
         hasher.update(obj.code_hash.as_bytes());
         hasher.update(obj.seal.as_bytes());
         hasher.update(&obj.satoshis.to_be_bytes());
         hasher.update(obj.owner.as_bytes());
-        hasher.update(obj.state_data.to_string().as_bytes());
+        hasher.update(&state_bytes);
         let res = hasher.finalize();
         let mut out = [0u8; 32];
         out.copy_from_slice(&res);
@@ -104,7 +107,7 @@ impl StateStore {
         }
         write_txn.commit()?;
 
-        // Update in-memory SMT
+        // Update in-memory SMT — return error if this fails (don't silently succeed)
         let key_hash = Self::hash_key(&obj.object_id);
         let val_hash = Self::hash_object(obj);
         match self.smt.write() {
@@ -112,7 +115,9 @@ impl StateStore {
                 smt.update(key_hash, val_hash);
             }
             Err(e) => {
-                tracing::error!("[Storage] Failed to acquire write lock on SMT: {}", e);
+                // SMT update failed — DB is committed but SMT is stale.
+                // Return error so caller knows state is inconsistent.
+                return Err(anyhow::anyhow!("SMT update failed after DB commit: {}", e));
             }
         }
 
@@ -264,13 +269,18 @@ impl StateStore {
             let mut undo_table = write_txn.open_table(UNDO_LOGS_TABLE)?;
             let mut obj_table = write_txn.open_table(OBJECTS_TABLE)?;
             let mut seals_table = write_txn.open_table(SEALS_TABLE)?;
+            let mut blocks_table = write_txn.open_table(BLOCKS_TABLE)?;
+            let mut transitions_table = write_txn.open_table(TRANSITIONS_TABLE)?;
+            let mut chain_meta_table = write_txn.open_table(CHAIN_META_TABLE)?;
 
             let mut to_delete_ids = Vec::new();
+            let mut stale_block_heights = Vec::new();
             for item in undo_table.iter()? {
                 let (id_acc, val_acc) = item?;
                 let log: UndoLogRecord = serde_json::from_slice(val_acc.value())?;
                 if log.chain == chain && log.block_height > target_height {
                     to_delete_ids.push(id_acc.value());
+                    stale_block_heights.push(log.block_height);
 
                     if log.action == "CREATE" {
                         // Undo create means delete object & remove its seal
@@ -287,7 +297,7 @@ impl StateStore {
                                 seals_table.remove(existing.seal.as_str())?;
                             }
                         }
-                        // Restore previous state
+                        // Restore previous state — preserve created_at_block
                         if let (Some(code_hash), Some(seal), Some(sats), Some(owner), Some(state)) = (
                             log.prev_code_hash,
                             log.prev_seal,
@@ -302,7 +312,7 @@ impl StateStore {
                                 satoshis: sats,
                                 owner,
                                 state_data: state,
-                                created_at_block: 0,
+                                created_at_block: log.prev_created_at_block.unwrap_or(0),
                                 updated_at_block: log.prev_updated_at_block.unwrap_or(target_height),
                             };
                             let ser = serde_json::to_vec(&prev_obj)?;
@@ -317,6 +327,30 @@ impl StateStore {
             for id in to_delete_ids {
                 undo_table.remove(id)?;
             }
+
+            // Delete stale block records (blocks above target_height)
+            for h in stale_block_heights {
+                let _ = blocks_table.remove(h);
+            }
+
+            // Delete stale transition records — scan and remove by block_height
+            let mut stale_txids = Vec::new();
+            for item in transitions_table.iter()? {
+                let (txid_acc, val_acc) = item?;
+                if let Ok(rec) = serde_json::from_slice::<StateTransitionRecord>(val_acc.value()) {
+                    if rec.block_height > target_height {
+                        stale_txids.push(txid_acc.value().to_string());
+                    }
+                }
+            }
+            for txid in stale_txids {
+                let _ = transitions_table.remove(txid.as_str());
+            }
+
+            // Reset last_sync_block to target_height
+            let key = format!("{}_last_block", chain);
+            let serialized = serde_json::to_vec(&target_height)?;
+            chain_meta_table.insert(key.as_str(), serialized.as_slice())?;
         }
         write_txn.commit()?;
 

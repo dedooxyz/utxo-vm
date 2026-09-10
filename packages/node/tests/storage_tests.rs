@@ -73,6 +73,7 @@ fn test_storage_reorg_rollback() {
         prev_owner: Some("alice".to_string()),
         prev_state_data: Some(serde_json::json!({ "balance": 100 })),
         prev_updated_at_block: Some(10),
+        prev_created_at_block: Some(5),
     };
     store.save_undo_log(&undo).unwrap();
 

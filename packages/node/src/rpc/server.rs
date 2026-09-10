@@ -103,7 +103,7 @@ impl RateLimiter {
     pub fn check(&self, key: &str) -> bool {
         let mut windows = match self.windows.lock() {
             Ok(w) => w,
-            Err(_) => return true, // Poisoned lock, fail open
+            Err(_) => return false, // Poisoned lock — fail closed (deny all)
         };
         let now = Instant::now();
         let entry = windows.entry(key.to_string()).or_insert((now, 0));
@@ -207,11 +207,14 @@ async fn get_object(
         return Err((StatusCode::BAD_REQUEST, "Invalid object ID".to_string()));
     }
 
-    let obj = state
-        .store
-        .get_object(&id)
-        .or_else(|_| state.store.get_object_by_seal(&id))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Try by object_id first, then fall back to seal lookup on both Err and Ok(None)
+    let obj = match state.store.get_object(&id) {
+        Ok(Some(o)) => Some(o),
+        Ok(None) => state.store.get_object_by_seal(&id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        Err(_) => state.store.get_object_by_seal(&id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+    };
 
     if let Some(o) = obj {
         let value = serde_json::to_value(o)
@@ -499,6 +502,7 @@ struct MintRequest {
 struct CancelRequest {
     transfer_id: String,
     caller: String,
+    signature_hex: String,
 }
 
 async fn cancel_transfer(
@@ -510,7 +514,7 @@ async fn cancel_transfer(
 
     let transfer = state
         .bridge
-        .cancel_transfer(&req.transfer_id, &req.caller)
+        .cancel_transfer(&req.transfer_id, &req.caller, &req.signature_hex)
         .map_err(|e| {
             if e.to_string().contains("not owner") {
                 (StatusCode::FORBIDDEN, e.to_string())

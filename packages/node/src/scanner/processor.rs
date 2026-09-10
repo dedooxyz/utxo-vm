@@ -125,8 +125,11 @@ impl BlockProcessor {
                     };
 
                     // Record undo log for reorg safety
+                    // Use txid hash prefix to avoid collision between txs in same block
+                    let undo_id = ((block_height << 32) | (vout_idx as u64))
+                        ^ (u64::from_str_radix(&tx.txid.get(..8).unwrap_or("0"), 16).unwrap_or(0));
                     let undo = UndoLogRecord {
-                        id: (block_height << 32) | (vout_idx as u64),
+                        id: undo_id,
                         chain: self.chain.clone(),
                         block_height,
                         object_id: obj_id.clone(),
@@ -137,6 +140,7 @@ impl BlockProcessor {
                         prev_owner: None,
                         prev_state_data: None,
                         prev_updated_at_block: None,
+                        prev_created_at_block: None,
                     };
                     self.store.save_undo_log(&undo)?;
                     self.store.save_object(&record)?;
@@ -176,8 +180,10 @@ impl BlockProcessor {
                         let args = metadata.get("args").cloned().unwrap_or(serde_json::json!({}));
 
                         // Record undo log before updating
+                        let undo_id = ((block_height << 32) | (vout_idx as u64))
+                            ^ (u64::from_str_radix(&tx.txid.get(..8).unwrap_or("0"), 16).unwrap_or(0));
                         let undo = UndoLogRecord {
-                            id: (block_height << 32) | (vout_idx as u64),
+                            id: undo_id,
                             chain: self.chain.clone(),
                             block_height,
                             object_id: obj.object_id.clone(),
@@ -188,6 +194,7 @@ impl BlockProcessor {
                             prev_owner: Some(obj.owner.clone()),
                             prev_state_data: Some(obj.state_data.clone()),
                             prev_updated_at_block: Some(obj.updated_at_block),
+                            prev_created_at_block: Some(obj.created_at_block),
                         };
                         self.store.save_undo_log(&undo)?;
 
@@ -196,17 +203,13 @@ impl BlockProcessor {
                             match self.execute_wasm(&obj, &method, &args, &sender, out.value) {
                                 Ok(result) => (result.state_data, result.gas_consumed),
                                 Err(e) => {
+                                    // WASM execution failed — must NOT mutate state.
+                                    // Revert: skip this transaction entirely.
                                     warn!(
-                                        "[Processor] WASM execution failed for {}: {}",
+                                        "[Processor] WASM execution failed for {}: {} — reverting, no state change",
                                         obj.object_id, e
                                     );
-                                    // Fallback to simple state mutation
-                                    let mut state = obj.state_data.clone();
-                                    if let Some(obj_map) = state.as_object_mut() {
-                                        obj_map.insert("last_method".to_string(), serde_json::Value::String(method.clone()));
-                                        obj_map.insert("last_caller".to_string(), serde_json::Value::String(sender.clone()));
-                                    }
-                                    (state, 21_500)
+                                    return Ok(None);
                                 }
                             }
                         } else {
@@ -313,15 +316,19 @@ impl BlockProcessor {
         })
     }
 
-    /// Retrieve WASM bytecode - from DHT or empty if not found
+    /// Retrieve WASM bytecode by code_hash.
+    /// In production, this fetches from Kademlia DHT or local cache.
+    /// Currently returns empty bytes for placeholder code_hash only.
     fn get_wasm_bytes(&self, code_hash: &str) -> Result<Vec<u8>> {
-        // For now, return empty bytes if code_hash is a placeholder
-        // In production, this would fetch from Kademlia DHT
         if code_hash == "wasm_default" || code_hash.is_empty() {
+            // Placeholder — no real WASM to execute
             Ok(Vec::new())
         } else {
-            // Attempt to decode as hex (actual WASM bytes stored in code_hash field)
-            hex::decode(code_hash).map_err(|e| anyhow::anyhow!("Invalid WASM hex: {}", e))
+            // code_hash is a SHA-256 hash, NOT the WASM bytes themselves.
+            // We need to fetch the actual WASM from DHT or local cache.
+            // Until DHT integration is wired, return an error so the processor
+            // reverts (instead of silently executing garbage).
+            Err(anyhow!("WASM bytecode not found for code_hash={} — DHT fetch not yet implemented", code_hash))
         }
     }
 }

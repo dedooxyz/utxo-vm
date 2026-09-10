@@ -125,18 +125,60 @@ impl StateRelay {
                 .ok_or_else(|| anyhow::anyhow!("Relay record not found: {}", record_id))?
         };
 
-        // Verify quorum
+        // Verify quorum — fail-closed on 0 validators
         let attestations = &record.message.attestations;
-        let mut root_counts = HashMap::new();
-        for att in attestations {
-            *root_counts.entry(&att.state_root).or_insert(0) += 1;
+        let total_validators = self.consensus.get_validator_count();
+
+        // F1.3: Fail-closed — zero validators means no trust anchor
+        if total_validators == 0 {
+            tracing::warn!("[Relay] Verification failed-closed: no validators registered");
+            record.status = RelayStatus::Failed;
+            self.records
+                .write()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+                .insert(record_id.to_string(), record.clone());
+            return Ok(record);
         }
 
-        let max_count = root_counts.values().max().unwrap_or(&0);
-        let total_validators = self.consensus.get_validator_count();
+        // Dedup by validator_pubkey and verify signatures
+        let mut seen_pubkeys = std::collections::HashSet::new();
+        let mut root_counts: HashMap<&str, usize> = HashMap::new();
+
+        for att in attestations {
+            // Verify ECDSA signature
+            if !self.consensus.verify_attestation(att) {
+                tracing::warn!("[Relay] Invalid signature from validator {}", att.validator_pubkey);
+                continue;
+            }
+            // Dedup
+            if !seen_pubkeys.insert(att.validator_pubkey.clone()) {
+                tracing::warn!("[Relay] Duplicate attestation from {}", att.validator_pubkey);
+                continue;
+            }
+            *root_counts.entry(att.state_root.as_str()).or_insert(0) += 1;
+        }
+
+        if root_counts.is_empty() {
+            record.status = RelayStatus::Failed;
+            self.records
+                .write()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+                .insert(record_id.to_string(), record.clone());
+            return Ok(record);
+        }
+
+        // Find winning root
+        let (winning_root, max_count) = root_counts
+            .into_iter()
+            .max_by(|(root_a, count_a), (root_b, count_b)| {
+                count_a.cmp(count_b).then_with(|| root_a.cmp(root_b))
+            })
+            .unwrap();
+
         let required = (total_validators * 2 + 2) / 3;
 
-        if *max_count >= required {
+        // Winning root must match the message's state_root
+        if winning_root == record.message.state_root && max_count >= required {
             record.status = RelayStatus::Verified;
             record.verified_at = Some(chrono::Utc::now().timestamp());
         } else {

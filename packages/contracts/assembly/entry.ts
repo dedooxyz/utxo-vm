@@ -197,7 +197,7 @@ function callSON(method: string, args: string): i32 {
 
 function callNativeVault(method: string, args: string): i32 {
   let totalLockedSatoshis = <u64>jsonGetInt(globalStateJson, "totalLockedSatoshis");
-  let vaultOwner = jsonGetString(globalStateJson, "owner");
+  let vaultOwner = jsonGetString(globalStateJson, "vaultOwner");
 
   let vault = new NativeVault(vaultOwner);
   vault.totalLockedSatoshis = totalLockedSatoshis;

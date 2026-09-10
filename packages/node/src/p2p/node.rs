@@ -103,12 +103,13 @@ pub struct P2pService {
 }
 
 /// Load or generate Ed25519 keypair for persistent peer identity.
-/// Key is saved to `key_path` (hex-encoded) and reused across restarts.
+/// Key is saved to `key_path` (hex-encoded protobuf) and reused across restarts.
 fn load_or_generate_keypair(key_path: &std::path::Path) -> libp2p::identity::Keypair {
     if key_path.exists() {
         if let Ok(hex_str) = std::fs::read_to_string(key_path) {
             if let Ok(bytes) = hex::decode(hex_str.trim()) {
-                if let Ok(keypair) = libp2p::identity::Keypair::ed25519_from_bytes(bytes.clone()) {
+                // Use from_protobuf_encoding to match the save format (to_protobuf_encoding)
+                if let Ok(keypair) = libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
                     info!("[P2P] Loaded existing identity key from {:?}", key_path);
                     return keypair;
                 }
@@ -119,7 +120,7 @@ fn load_or_generate_keypair(key_path: &std::path::Path) -> libp2p::identity::Key
 
     let keypair = libp2p::identity::Keypair::generate_ed25519();
 
-    // Persist the key via protobuf encoding
+    // Persist the key via protobuf encoding (matches from_protobuf_encoding on load)
     if let Ok(proto_bytes) = keypair.clone().to_protobuf_encoding() {
         if let Some(parent) = key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -348,6 +349,16 @@ impl P2pService {
                                     if let (Some(code_hash), Some(wasm_hex)) = (payload.get("code_hash"), payload.get("wasm_hex")) {
                                         if let (Some(ch), Some(wh)) = (code_hash.as_str(), wasm_hex.as_str()) {
                                             if let Ok(wasm_bytes) = hex::decode(wh) {
+                                                // Verify sha256(wasm_bytes) == code_hash before storing
+                                                use sha2::{Digest, Sha256};
+                                                let computed_hash = hex::encode(Sha256::digest(&wasm_bytes));
+                                                if computed_hash != ch {
+                                                    warn!(
+                                                        "[P2P] Rejected remote contract: hash mismatch (claimed={}, computed={})",
+                                                        ch, computed_hash
+                                                    );
+                                                    continue;
+                                                }
                                                 let key = RecordKey::new(&ch.as_bytes());
                                                 let record = Record {
                                                     key,
