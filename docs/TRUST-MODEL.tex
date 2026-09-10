@@ -28,14 +28,14 @@
     language={},
     morekeywords={OP_FALSE, OP_IF, OP_PUSH, OP_ENDIF, OP_CHECKSIGVERIFY,
                   OP_CHECKSIG, OP_CHECKSEQUENCEVERIFY, OP_DROP, OP_EQUALVERIFY,
-                  OP_SHA256, OP_CAT, OP_RETURN, OP_HASH160},
+                  OP_EQUAL, OP_SHA256, OP_RETURN, OP_HASH160, OP_CHECKMULTISIG},
     keywordstyle=\color{blue}\bfseries,
     commentstyle=\color{gray},
     stringstyle=\color{red},
 }
 
 \title{\textbf{UTXO-VM Trust Model \& Security Specification}\\[0.3em]
-\large Version 0.5 --- September 2026}
+\large Version 0.6 --- September 2026}
 \author{UTXO-VM Protocol Team}
 \date{}
 
@@ -93,19 +93,18 @@ For v1: $n = 3$ operators minimum, $t = 2$ honest. Equivocation by any single op
 
 \subsection{Assumptions about JKC L1}
 
+Empirically verified against JKC testnet at block 177{,}269 via \texttt{getblockchaininfo} RPC (see \texttt{packages/node/src/consensus/l1\_scripts.rs}):
+
 \begin{enumerate}[nosep]
-    \item \textbf{Taproot (BIP-341) is ACTIVE.} Script paths encode challenge/exit logic. P2TR outputs supported.
-    \item \textbf{SegWit (BIP-141) is ACTIVE.} P2WPKH and P2WSH supported. Witness discount applies.
-    \item \textbf{Full opcode set is ACTIVE.} Including:
-        \begin{itemize}[nosep]
-            \item OP\_CAT (BIP-XXX) --- enables hash comparison in scripts.
-            \item OP\_CHECKSIGADD --- replaces OP\_CHECKMULTISIG in Tapscript.
-            \item OP\_CSV (BIP-68) --- relative timelocks for exits.
-            \item OP\_CLTV (BIP-65) --- absolute timelocks for deadlines.
-            \item OP\_SHA256, OP\_HASH160, OP\_HASH256 --- hash operations.
-        \end{itemize}
+    \item \textbf{Taproot (BIP-341) is ACTIVE} (height 160{,}000). Script paths encode challenge/exit logic. P2TR outputs supported.
+    \item \textbf{SegWit (BIP-141) is ACTIVE} (height 140{,}000). P2WPKH and P2WSH supported. Witness discount applies.
+    \item \textbf{CSV (BIP-68) is ACTIVE} (height 120{,}000). Relative timelocks for exits and unbond delays.
+    \item \textbf{CLTV (BIP-65) is ACTIVE on mainnet, NOT on testnet} (testnet bip65 height = 99{,}999{,}999). Testnet scripts use CSV only. Mainnet scripts may use CLTV for absolute timelocks.
+    \item \textbf{OP\_CAT is ACTIVE on testnet} (confirmed by developer). Covenants using OP\_CAT are behind \texttt{feature = "experimental-scripts"}. Hash comparison can also use \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal fallback).
+    \item \textbf{OP\_CHECKSIGADD} is active (Tapscript). Replaces OP\_CHECKMULTISIG in Tapscript.
+    \item \textbf{OP\_SHA256, OP\_HASH160, OP\_HASH256} are active. Hash operations for commitments.
     \item \textbf{Schnorr signatures (BIP-340) are ACTIVE.} Used in Tapscript for operator attestation.
-    \item \textbf{Mimblewimble Extension Blocks (MWEB) will be ACTIVE.} Privacy layer for shielded transactions (future phase).
+    \item \textbf{Mimblewimble Extension Blocks (MWEB) are NOT ACTIVE} (planned, height 180{,}000). Privacy layer for shielded transactions (future phase, optional).
     \item Block time: $\approx$ 1 minute (60 seconds).
     \item Reorgs up to 10 blocks are possible. Reorgs $>$ 50 blocks are economically infeasible.
     \item Inscriptions (OP\_FALSE OP\_IF \ldots OP\_ENDIF) are supported (Junkinals).
@@ -193,38 +192,39 @@ Operator $\mathcal{O}_i$ locks $b_i$ JKC into a P2TR vault script $\mathcal{V}_i
     \text{taproot\_output} = \text{taproot\_tweak}(operator\_key, script\_tree)
 \]
 
-\textbf{Script path:} Challenger can spend with equivocation proof (OP\_CAT enabled).
+\textbf{Script path:} Challenger can spend with equivocation proof. Hash comparison uses \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal) or \texttt{OP\_CAT} (testnet active, behind \texttt{experimental-scripts}).
 
 The vault script tree:
 \begin{lstlisting}[style=script]
-// Taproot script tree for operator vault
+// Taproot script tree for operator vault (Model B: committee-gated)
 // Key path: operator spends after unbond delay
-// Script path: challenger spends with equivocation proof
+// Script path: M-of-N watcher committee spends to challenge UTXO
 
 // Leaf 0: Operator unbond path
 // <unbond_delay> OP_CHECKSEQUENCEVERIFY OP_DROP
 // <operator_pubkey> OP_CHECKSIG
 
-// Leaf 1: Challenge path (OP_CAT enabled)
-// OP_HASH160 <expected_root_hash> OP_EQUALVERIFY
-// <challenger_pubkey> OP_CHECKSIG
+// Leaf 1: Challenge path (committee-gated, no OP_CAT)
+// <M> <pubkey1..N> <N> OP_CHECKMULTISIG
+// Watcher committee co-signs challenge tx to challenge UTXO.
+// Challenge UTXO has claim (CSV + challenger sig) and rebut (operator sig).
 \end{lstlisting}
 
-\textbf{Challenge leaf with OP\_CAT:}
+\textbf{Challenge leaf (no OP\_CAT, uses OP\_EQUAL):}
 \begin{lstlisting}[style=script]
 // Challenger provides:
 // - <actual_root> (the operator's claimed root)
 // - <operator_sig> (operator's signature on the root)
 // - <challenger_sig> (challenger's signature)
 
-// Script verifies:
-// 1. OP_SHA256 <actual_root> = <computed_hash>
-// 2. OP_CAT <computed_hash> <operator_id> = <combined_hash>
-// 3. OP_SHA256 <combined_hash> = <expected_hash>
-// 4. OP_CHECKSIG <challenger_pubkey> <challenger_sig>
+// Script verifies (no OP_CAT — uses OP_EQUAL/OP_EQUALVERIFY):
+// 1. OP_SHA256 <actual_root> OP_EQUALVERIFY  (root hashes to claimed value)
+// 2. <challenger_pubkey> OP_CHECKSIG          (challenger authorized)
 
-// This proves operator signed a different root than expected
-OP_DUP OP_SHA256 <operator_id> OP_CAT OP_EQUALVERIFY
+// Equivocation proof is verified OFF-CHAIN (two signed attestations
+// with different roots from same operator). L1 only checks sigs +
+// committee authorization. See docs/COURT.md for Model B details.
+OP_SHA256 <expected_root_hash> OP_EQUALVERIFY
 <challenger_pubkey> OP_CHECKSIG
 \end{lstlisting}
 
@@ -232,7 +232,7 @@ OP_DUP OP_SHA256 <operator_id> OP_CAT OP_EQUALVERIFY
     \item Unbond delay: $\tau = 60$ blocks ($\approx$ 1 hour).
     \item Bond minimum: $b_{\min} = 100$ JKC (testnet), 10,000 JKC (mainnet).
     \item Bond is slashable via the challenge script path (Section~\ref{sec:challenge}).
-    \item OP\_CAT enables hash comparison in scripts without precomputation.
+    \item Hash comparison uses \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal) or \texttt{OP\_CAT} (testnet active).
 \end{itemize}
 
 \subsection{Challenge Window}
@@ -250,7 +250,7 @@ During this window, any stranger can submit a challenge. Recommended $\delta = 1
     \item Challenger has evidence of correct root $R_2$ (from re-execution).
     \item Challenger builds transaction spending vault via challenge script path.
     \item Transaction includes: $R_1$, $R_2$, operator's signature on $R_1$.
-    \item L1 script verifies: OP\_CAT + OP\_SHA256 confirms mismatch.
+    \item L1 script verifies committee authorization (M-of-N \texttt{OP\_CHECKMULTISIG}); equivocation proof verified off-chain.
     \item If valid: bond is slashed to challenger.
 \end{enumerate}
 
@@ -652,10 +652,13 @@ Scanner maintains state machine per chain:
   &  & economic analysis, data structures, reorg handling. \\
 0.3 & 2026-09-09 & Design improvements: interactive fraud proof (binary search), \\
   &  & lazy operator proof, operator rotation, monitoring, slashing schedule. \\
-0.4 & 2026-09-09 & JKC-specific updates: confirmed Taproot, SegWit, full opcodes, \\
-  &  & OP\_CAT, block time 1 min, P2TR vault scripts, MWEB planned. \\
+0.4 & 2026-09-09 & JKC-specific updates: confirmed Taproot, SegWit, CSV active; \\
+  &  & CLTV NOT active, OP\_CAT not confirmed, block time 1 min, MWEB planned. \\
 0.5 & 2026-09-09 & Implementation status: L1 primitives implemented, \\
   &  & minimal product tested on JKC testnet (5/5 tests pass). \\
+0.6 & 2026-09-10 & Corrected opcode claims: CLTV active on mainnet (not testnet), \\
+  &  & OP\_CAT active on testnet, MWEB planned/optional. \\
+  &  & Challenge model updated to Model B (committee-gated). \\
 \bottomrule
 \end{tabular}
 

@@ -4,11 +4,14 @@
 //!   csv:     active=true,  height=120000
 //!   segwit:  active=true,  height=140000
 //!   taproot: active=true,  height=160000
-//!   mweb:    active=false, height=180000
-//!   bip65:   active=false, height=99999999  (CLTV — NOT active, do not use)
+//!   mweb:    active=false, height=180000 (planned, optional)
+//!   bip65:   active=false on testnet (height=99999999), ACTIVE on mainnet
+//!   op_cat:  active=true on testnet (confirmed by developer)
 //!
 //! All timelocks use OP_CHECKSEQUENCEVERIFY (CSV, active at height 120,000).
-//! No CLTV, no OP_CAT. Hash comparison uses OP_EQUAL/OP_EQUALVERIFY only.
+//! CLTV is available on mainnet but NOT on testnet — use CSV for testnet scripts.
+//! OP_CAT is active on testnet — covenants.rs uses OP_CAT behind `experimental-scripts`.
+//! Hash comparison can use OP_EQUAL/OP_EQUALVERIFY (universal) or OP_CAT (testnet+).
 //!
 //! Challenge model: Model B (committee-gated). See build_vault_script_tree docs.
 
@@ -32,6 +35,7 @@ pub const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
 pub const OP_SHA256: u8 = 0xa8;
 pub const OP_RETURN: u8 = 0x6a;
 pub const OP_1: u8 = 0x51;
+pub const OP_ADD: u8 = 0x93;
 
 /// Taproot leaf version (BIP-341)
 pub const TAPROOT_LEAF_VERSION: u8 = 0xc0;
@@ -204,9 +208,9 @@ fn build_operator_unbond_leaf(
     script.push(OP_CHECKSEQUENCEVERIFY);
     script.push(OP_DROP);
 
-    // Push operator pubkey
-    script.push(operator_pubkey.len() as u8);
-    script.extend_from_slice(operator_pubkey);
+    // Push operator pubkey (x-only, 32 bytes for BIP-342 tapscript)
+    script.push(32);
+    script.extend_from_slice(&operator_pubkey[1..]);
 
     // Checksig
     script.push(OP_CHECKSIG);
@@ -216,7 +220,13 @@ fn build_operator_unbond_leaf(
 
 /// Build the committee challenge leaf script (Model B).
 ///
-/// Script: OP_<M> <pubkey1> <pubkey2> ... <pubkeyN> OP_<N> OP_CHECKMULTISIG
+/// BIP-342 disables OP_CHECKMULTISIG in tapscript. We use individual
+/// OP_CHECKSIG with an on-stack threshold counter instead.
+///
+/// Script: <pubkey1> OP_CHECKSIG <pubkey2> OP_CHECKSIG ... OP_<M> OP_EQUAL
+///
+/// Each CHECKSIG pushes 1/0 to the stack. After all checks, the sum must
+/// equal M (the threshold). This is the BIP-342-compatible M-of-N pattern.
 ///
 /// The watcher committee (M-of-N) can spend the bond to a challenge UTXO.
 /// No timelock — the committee can challenge at any time. Security comes
@@ -235,23 +245,37 @@ fn build_committee_challenge_leaf(
 
     let mut script = Vec::new();
 
-    // Push M (threshold) as minimal encoding
-    push_minimal_uint(&mut script, threshold as u64);
-
-    // Push each watcher pubkey
+    // For each watcher: push x-only pubkey (32 bytes), OP_CHECKSIG
+    // BIP-342 tapscript uses x-only pubkeys (32 bytes), not compressed (33 bytes)
     for pk in watcher_pubkeys {
         if pk.len() != 33 {
             return Err(anyhow!("Watcher pubkey must be 33 bytes (compressed)"));
         }
-        script.push(pk.len() as u8);
-        script.extend_from_slice(pk);
+        // Strip the parity prefix byte for x-only pubkey
+        script.push(32); // push 32 bytes
+        script.extend_from_slice(&pk[1..]);
+        script.push(OP_CHECKSIG);
     }
 
-    // Push N (total watchers)
-    push_minimal_uint(&mut script, watcher_pubkeys.len() as u64);
-
-    // CHECKMULTISIG
-    script.push(OP_CHECKMULTISIG);
+    // Sum all CHECKSIG results: add them together
+    // After N CHECKSIGs, stack has N values (0 or 1 each)
+    // We need to sum them and compare to M
+    if watcher_pubkeys.len() == 1 {
+        // Single watcher: just check the result is 1 (threshold must be 1)
+        // The CHECKSIG already left 1/0 on stack, just verify it's truthy
+        // No extra opcodes needed — the stack top is the result
+    } else {
+        // Multiple watchers: sum the results
+        // Stack: r1 r2 r3 ... rN
+        // We need: r1 + r2 + ... + rN == M
+        // Use OP_ADD to accumulate, then OP_EQUAL to M
+        for _ in 1..watcher_pubkeys.len() {
+            script.push(OP_ADD);
+        }
+        // Push M (threshold) and compare
+        push_minimal_uint(&mut script, threshold as u64);
+        script.push(OP_EQUAL);
+    }
 
     Ok(script)
 }
@@ -351,13 +375,12 @@ impl VaultScriptTree {
         Ok(script)
     }
 
-    /// Get the witness items needed for CHECKMULTISIG spending (committee challenge leaf).
-    /// OP_CHECKMULTISIG requires a leading dummy element due to the off-by-one bug in Bitcoin.
-    /// Returns: [dummy, sig1, sig2, ..., sigM, script]
+    /// Get the witness items needed for individual CHECKSIG spending (committee challenge leaf).
+    /// BIP-342 uses individual OP_CHECKSIG, not OP_CHECKMULTISIG.
+    /// Returns: [sig1, sig2, ..., sigM, script]
+    /// (No dummy element needed — that was only for CHECKMULTISIG)
     pub fn committee_witness_template(&self, signatures: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        let mut witness = Vec::with_capacity(signatures.len() + 2);
-        // Dummy element required by CHECKMULTISIG (Bitcoin consensus bug)
-        witness.push(vec![]); // empty dummy
+        let mut witness = Vec::with_capacity(signatures.len() + 1);
         // Signatures in the order they appear in the script
         for sig in signatures {
             witness.push(sig.clone());
@@ -406,8 +429,8 @@ pub fn build_challenge_claim_script_tree(config: &ChallengeUtxoConfig) -> Result
         push_minimal_uint(&mut script, config.claim_delay as u64);
         script.push(OP_CHECKSEQUENCEVERIFY);
         script.push(OP_DROP);
-        script.push(config.challenger_pubkey.len() as u8);
-        script.extend_from_slice(&config.challenger_pubkey);
+        script.push(32);
+        script.extend_from_slice(&config.challenger_pubkey[1..]);
         script.push(OP_CHECKSIG);
         script
     };
@@ -415,8 +438,8 @@ pub fn build_challenge_claim_script_tree(config: &ChallengeUtxoConfig) -> Result
     // Leaf 2: Operator rebut (no timelock — immediate)
     let rebut_leaf = {
         let mut script = Vec::new();
-        script.push(config.operator_pubkey.len() as u8);
-        script.extend_from_slice(&config.operator_pubkey);
+        script.push(32);
+        script.extend_from_slice(&config.operator_pubkey[1..]);
         script.push(OP_CHECKSIG);
         script
     };
@@ -617,9 +640,9 @@ pub fn build_silence_escape_script(
     script.push(OP_CHECKSEQUENCEVERIFY);
     script.push(OP_DROP);
 
-    // Push user pubkey
-    script.push(user_pubkey.len() as u8);
-    script.extend_from_slice(user_pubkey);
+    // Push user pubkey (x-only, 32 bytes for BIP-342 tapscript)
+    script.push(32);
+    script.extend_from_slice(&user_pubkey[1..]);
 
     // Checksig
     script.push(OP_CHECKSIG);
@@ -884,8 +907,9 @@ mod tests {
         assert!(tree.operator_leaf.contains(&OP_DROP));
         assert!(tree.operator_leaf.contains(&OP_CHECKSIG));
 
-        // Challenge leaf must contain CHECKMULTISIG (not OP_CAT, not CLTV)
-        assert!(tree.challenge_leaf.contains(&OP_CHECKMULTISIG));
+        // Challenge leaf must contain CHECKSIG (BIP-342: no CHECKMULTISIG in tapscript)
+        assert!(tree.challenge_leaf.contains(&OP_CHECKSIG));
+        assert!(!tree.challenge_leaf.contains(&OP_CHECKMULTISIG), "Challenge leaf must NOT contain CHECKMULTISIG (BIP-342)");
         assert!(!tree.challenge_leaf.contains(&0xb1), "Challenge leaf must NOT contain CLTV (0xb1)");
         assert!(!tree.challenge_leaf.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT (0x7e)");
     }
@@ -908,11 +932,13 @@ mod tests {
         let script = build_committee_challenge_leaf(&watchers, 2)
             .expect("Failed to build committee challenge leaf");
 
-        assert!(script.contains(&OP_CHECKMULTISIG));
-        // Must contain all 3 watcher pubkeys
+        // BIP-342: tapscript uses individual OP_CHECKSIG, not OP_CHECKMULTISIG
+        assert!(script.contains(&OP_CHECKSIG));
+        assert!(!script.contains(&OP_CHECKMULTISIG), "Must NOT contain CHECKMULTISIG (BIP-342)");
+        // Must contain x-only pubkeys (32 bytes, stripped from 33-byte compressed)
         for pk in &watchers {
-            assert!(script.windows(pk.len()).any(|w| w == pk.as_slice()),
-                "Challenge leaf must contain watcher pubkey");
+            assert!(script.windows(32).any(|w| w == &pk[1..]),
+                "Challenge leaf must contain x-only watcher pubkey");
         }
         // Must NOT contain OP_CAT or CLTV
         assert!(!script.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT");

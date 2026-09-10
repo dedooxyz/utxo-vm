@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod challenge;
 pub mod covenants;
 pub mod fee_distribution;
 pub mod l1_scripts;

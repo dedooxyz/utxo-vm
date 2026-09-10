@@ -1,12 +1,15 @@
 # Cross-Chain Settlement Architecture
 
+> **Status: FUTURE / OUT OF SCOPE FOR v1.**
+> UTXO-VM v1 is JKC-only (seal-native WASM on JKC UTXOs). Cross-chain anchoring is a **future, optional** capability — not a required architecture. Hub-and-spoke DOGE/LTC/BTC is NOT part of the v1 product. See `MISSION.md` and `AGENTS.md` for the v1 scope.
+
 ## Problem
 AuxPow chains (Junkcoin, Dogecoin, Litecoin forks) merged mine with Bitcoin/Litecoin for security, but have NO settlement layer for:
 - State transitions between chains
 - Cross-chain asset transfers
 - Contract verification across chains
 
-## Solution: Junkcoin as Settlement Layer
+## Solution: Junkcoin as Settlement Layer (FUTURE)
 
 ### Architecture
 ```
@@ -137,20 +140,36 @@ AuxPow chains (Junkcoin, Dogecoin, Litecoin forks) merged mine with Bitcoin/Lite
 - Validators earn fees for signing claims
 - Junkcoin miners earn fees for anchoring state
 
-### Implementation Roadmap
+### Implementation Roadmap (FUTURE — not v1)
 
-1. **Phase 1: State Anchoring** ✅
+1. **Phase 1: State Anchoring** ⏳ Future
    - Child chain broadcasts merkle root to Junkcoin
    - Junkcoin stores and seals
 
-2. **Phase 2: Seal Verification** 🔄
+2. **Phase 2: Seal Verification** ⏳ Future
    - Child chain queries Junkcoin for seal
    - Merkle proof verification
 
-3. **Phase 3: Cross-Chain Transfer** ⏳
+3. **Phase 3: Cross-Chain Transfer** ⏳ Future
    - Atomic swaps via seals
    - Bridge contracts
 
-4. **Phase 4: Full Settlement** ⏳
+4. **Phase 4: Full Settlement** ⏳ Future
    - Multi-chain state sync
    - Governance and upgradeability
+
+> **Note:** v1 ships JKC-only. Cross-chain is explicitly out of scope until the JKC court (equivocation slash) works end-to-end. See `AGENTS.md` forbidden list.
+
+## Technical Prerequisites (FUTURE)
+
+### VM Engine (already implemented for v1 JKC-only)
+- Engine: Wasmtime 18.0.4 (pinned)
+- Gas Model: Fuel-based metering
+- Memory: Bounded (32 pages max, 2 MB)
+- State: Seal-based, not account-based
+
+### Security Primitives
+- **Seals**: UTXO-bound, double-spend prevention (L1 consensus)
+- **Merkle proofs**: Deterministic state verification
+- **Signatures**: Cryptographic (secp256k1 ECDSA)
+- **Reorgs**: Child chains wait N confirmations for economic finality

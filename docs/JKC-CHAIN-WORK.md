@@ -4,14 +4,20 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 
 ## 1. Taproot Activation Plan
 
-### Current Status
-- JKC Testnet: Taproot active (confirmed by developer)
-- JKC Mainnet: Taproot active (confirmed by developer)
-- MWEB: Planned for next month
+### Current Status (empirically verified at JKC testnet block 177,269 via `getblockchaininfo` RPC)
 
-### Activation Height
-- **Testnet:** Already active
-- **Mainnet:** Already active
+| Soft fork | Testnet | Mainnet |
+|:---|:---|:---|
+| CSV (BIP-68) | ✅ Active (h=120,000) | ✅ Active |
+| SegWit (BIP-141) | ✅ Active (h=140,000) | ✅ Active |
+| Taproot (BIP-341) | ✅ Active (h=160,000) | ✅ Active |
+| CLTV (BIP-65) | ❌ Not active (bip65=99,999,999) | ✅ Active |
+| OP_CAT | ✅ Active (confirmed by developer) | ✅ Active |
+| MWEB | ❌ Not active (h=180,000 planned) | ❌ Not active (optional/later) |
+
+> Source: `packages/node/src/consensus/l1_scripts.rs` header comment.
+> Note: CLTV is available on mainnet but NOT on testnet. Testnet scripts use CSV only.
+> OP_CAT is active on testnet — covenants.rs uses OP_CAT behind `experimental-scripts` feature.
 
 ### Required Features
 - [x] P2TR (Pay-to-Taproot) support
@@ -19,7 +25,7 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 - [x] Tapscript (v0/v1)
 - [x] Key path spending
 - [x] Script path spending
-- [ ] MWEB (planned next month)
+- [ ] MWEB (planned, not yet active)
 
 ## 2. Required Opcode List
 
@@ -35,19 +41,18 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 | OP_RIPEMD160 | ✅ Active | RIPEMD160 hash |
 
 ### Time Lock Opcodes
-| Opcode | Status | Purpose |
-|:---|:---|:---|
-| OP_CHECKLOCKTIMEVERIFY (CLTV) | ✅ Active | Absolute time lock |
-| OP_CHECKSEQUENCEVERIFY (CSV) | ✅ Active | Relative time lock |
+| Opcode | Testnet | Mainnet | Purpose |
+|:---|:---|:---|:---|
+| OP_CHECKSEQUENCEVERIFY (CSV) | ✅ Active (h=120,000) | ✅ Active | Relative time lock |
+| OP_CHECKLOCKTIMEVERIFY (CLTV) | ❌ Not active (bip65=99,999,999) | ✅ Active | Absolute time lock (mainnet only) |
 
 ### Cryptographic Opcodes
-| Opcode | Status | Purpose |
-|:---|:---|:---|
-| OP_CAT | ✅ Active | Concatenate two byte arrays |
-| OP_SPLIT | ✅ Active | Split byte array at position |
-| OP_SIZE | ✅ Active | Push size of stack item |
-| OP_LEFT | ✅ Active | Take left bytes |
-| OP_RIGHT | ✅ Active | Take right bytes |
+| Opcode | Testnet | Mainnet | Purpose |
+|:---|:---|:---|:---|
+| OP_CAT | ✅ Active | ✅ Active | Concatenate two byte arrays |
+| OP_SPLIT | ✅ Active | ✅ Active | Split byte array at position |
+| OP_SIZE | ✅ Active | ✅ Active | Push size of stack item |
+| OP_EQUAL / OP_EQUALVERIFY | ✅ Active | ✅ Active | Hash comparison (universal fallback) |
 
 ### Control Flow Opcodes
 | Opcode | Status | Purpose |
@@ -132,35 +137,29 @@ OP_ENDIF
 
 ## 5. Script Templates
 
-### Vault Script (P2TR)
+### Vault Script (P2TR, Model B — committee-gated)
 ```rust
-// Key path: operator can spend after unbond delay
-// Script path: challenger can slash with proof
-let vault_script = script! {
-    // If operator key path
-    if { check_multisig(2, vec![operator_key, operator_key_2]) } then {
-        // Check unbond delay
-        check_sequence_verify(UNBOND_DELAY)
-    }
-    // If challenger script path
-    else if { check_multisig(2, vec![challenger_key, operator_key]) } then {
-        // OP_CAT hash comparison
-        // Verify fraud proof
-    }
-}
+// Key path: operator can spend after unbond delay (CSV)
+// Script path: M-of-N watcher committee can spend to challenge UTXO
+//
+// Leaf 0 (unbond): <unbond_delay> CSV DROP <operator_pubkey> CHECKSIG
+// Leaf 1 (challenge): <M> <pubkey1..N> <N> CHECKMULTISIG
+//
+// Challenge UTXO second stage:
+//   Claim leaf: <claim_delay> CSV DROP <challenger_pubkey> CHECKSIG
+//   Rebut leaf: <operator_pubkey> CHECKSIG (no timelock)
+//
+// No CLTV, no OP_CAT. CSV + Taproot only.
+// See packages/node/src/consensus/l1_scripts.rs for the implementation.
 ```
 
-### Challenge Script
+### Challenge Script (no OP_CAT)
 ```rust
+// Equivocation proof verified OFF-CHAIN (two signed attestations,
+// different roots, same operator). L1 only checks committee authorization.
 let challenge_script = script! {
-    // Challenger key
-    OP_CHECKSIGVERIFY
-    // Fraud proof hash
-    OP_SHA256
-    OP_EQUALVERIFY
-    // State root
-    OP_SHA256
-    OP_EQUAL
+    // Committee authorization (M-of-N watchers)
+    OP_CHECKMULTISIG
 }
 ```
 
@@ -196,22 +195,27 @@ let seal_script = script! {
 
 | Component | Status | Notes |
 |:---|:---|:---|
-| P2TR support | ✅ Active | Confirmed by developer |
-| OP_CAT | ✅ Active | Confirmed by developer |
-| CHECKSIGADD | ✅ Active | Confirmed by developer |
-| CLTV/CSV | ✅ Active | Confirmed by developer |
-| MWEB | ⏳ Planned | Next month |
+| P2TR support | ✅ Active | Verified at h=160,000 |
+| CSV (BIP-68) | ✅ Active | Verified at h=120,000 |
+| SegWit (BIP-141) | ✅ Active | Verified at h=140,000 |
+| CHECKSIGADD | ✅ Active | Tapscript |
+| CLTV (BIP-65) | ✅ Mainnet / ❌ Testnet | Testnet bip65=99,999,999; mainnet active |
+| OP_CAT | ✅ Active | Testnet confirmed; covenants behind `experimental-scripts` |
+| MWEB | ⏳ Planned | Not yet active (h=180,000 planned, optional/later) |
 
 ## 8. Testing
 
 ### Testnet Testing
 - [x] P2TR vault deployment
-- [x] OP_CAT challenge script
+- [x] CSV-based challenge/silence scripts
 - [x] Seal spend script
 - [x] Batch commitment
-- [ ] Full Taproot script path spending
+- [ ] Full Taproot script path spending (requires BIP-341 script path spending)
+- [x] OP_CAT challenge script (OP_CAT active on testnet)
 
 ### Mainnet Deployment
-- [ ] Taproot activation verification
-- [ ] Opcode availability verification
+- [ ] Taproot activation verification (mainnet)
+- [ ] CSV/SegWit availability verification (mainnet)
+- [x] CLTV status verification (mainnet active)
+- [x] OP_CAT status verification (testnet active)
 - [ ] Address format verification

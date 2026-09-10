@@ -83,4 +83,35 @@ impl ElectrsClient {
         let tx = resp.json::<ElectrsTx>().await?;
         Ok(tx)
     }
+
+    /// Broadcast a raw transaction to the network.
+    ///
+    /// Submits the raw tx hex to the electrs `/tx` POST endpoint.
+    /// Returns the broadcast txid on success.
+    pub async fn broadcast_tx(&self, raw_hex: &str) -> Result<String> {
+        let url = format!("{}/tx", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("Content-Type", "text/plain")
+            .body(raw_hex.to_string())
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Broadcast failed: HTTP {} — {}",
+                status,
+                body
+            ));
+        }
+
+        let txid = resp.text().await?.trim().to_string();
+        if txid.is_empty() {
+            return Err(anyhow::anyhow!("Broadcast returned empty txid"));
+        }
+        Ok(txid)
+    }
 }

@@ -17,14 +17,21 @@
 - Contract compilation (AssemblyScript → WASM)
 - State replay verification (two replays → same root)
 - Script templates for vault, challenge, silence escape (testnet only)
+- **On-chain challenge slash (BIP-341 P2TR script-path spend)** — validated on JKC testnet (2026-09-10)
+- **Operator slashing on-chain** — bonded vault slashed via watcher committee challenge leaf
+- Equivocation detection + cryptographic proof verification
+- 3-of-3 validator quorum attestations posted on-chain
+- Scanner daemon (`utxo-vmd`) syncing live JKC testnet blocks
+- Live testnet operations: SOT mint, NFT mint, NativeVault, AtomicSwap, attestation posting
 
 **What does NOT work yet:**
-- On-chain challenge spending a liar's bond (requires BIP-341 script path spending)
-- Operator slashing on-chain (only in-memory struct)
 - C ABI for Core wallet integration
 - Second independent implementation
+- On-chain divergence verification (Bitcoin Script cannot verify WASM execution — off-chain only)
 
 **Do not use in production.** This is a research prototype.
+
+> **Test results**: 84 tests pass (60 offline + 24 live testnet). See `docs/TESTING.md` for full test documentation, live tx IDs, and BIP-342 compliance fixes.
 
 ---
 
@@ -109,24 +116,44 @@ cargo test
 ## 🧪 Testing
 
 ```bash
-# Core VM tests (9 tests)
+# Core VM tests (12 tests)
 cargo test -p utxo-core-vm
 
-# Node consensus tests (24 tests)
-cargo test -p utxo-vmd --lib consensus
+# Node library tests (51 tests: consensus, scanner, storage, p2p, rpc)
+cargo test -p utxo-vmd --lib
 
-# Full testnet deployment
-node test-jkc-minimal-product.cjs
+# Node integration tests (12 tests)
+cargo test -p utxo-vmd --test consensus_tests --test processor_tests --test rpc_tests --test smt_tests --test storage_tests --test p2p_tests --test cross_chain_tests
+
+# Full workspace (all offline tests, 60 total)
+cargo test --workspace
+
+# Live testnet tests (24 tests, spend real tJKC — must pass --ignored)
+cargo test -p utxo-vmd --test live_testnet -- --nocapture --ignored
+cargo test -p utxo-vmd --test live_write_testnet -- --nocapture --ignored
+cargo test -p utxo-vmd --test live_broadcast -- --nocapture --ignored
+cargo test -p utxo-vmd --test live_mint_call -- --nocapture --ignored
+cargo test -p utxo-vmd --test live_contracts -- --nocapture --ignored
+cargo test -p utxo-vmd --test live_quorum_equivocation -- --nocapture --ignored
+cargo test -p utxo-vmd --test live_vault_challenge -- --nocapture --ignored
+
+# Scanner daemon against live testnet
+cargo run -p utxo-vmd -- --chain JKC_TESTNET --electrs-url https://jkc-testnet-api.s3na.xyz
 ```
+
+> **Full test documentation**: see [`docs/TESTING.md`](docs/TESTING.md) for every test file, what it covers, live testnet results (10 confirmed txs), and BIP-342 compliance fixes discovered through live testing.
 
 ---
 
 ## 📄 Documentation
 
+- [Testing Guide](docs/TESTING.md) - Full test suite, live testnet results, BIP-342 fixes
 - [Trust Model](docs/TRUST-MODEL.tex) - Adversary model, JKC parameters, slashing
+- [Court Model](docs/COURT.md) - L1 checks, operator checks, slashing mechanics, stubs
 - [WASM ISA](docs/WASM-ISA.md) - Supported WASM features and execution model
-- [Lifcycle](docs/LIFECYCLE.md) - Compile → Deploy → Call → Challenge
+- [Lifecycle](docs/LIFECYCLE.md) - Compile → Deploy → Call → Challenge
 - [JKC Chain Work](docs/JKC-CHAIN-WORK.md) - Taproot, opcodes, addresses
+- [Cross-Chain Architecture](docs/CROSS-CHAIN-ARCHITECTURE.md) - Multi-chain settlement
 - [Mission](MISSION.md) - 9-step roadmap with progress
 
 ---

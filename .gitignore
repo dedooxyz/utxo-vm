@@ -28,3 +28,6 @@ data/
 *.fls
 *.fdb_latexmk
 *.synctex.gz
+
+# Legacy docs (moved out of active docs/, kept locally for reference)
+docs/legacy/

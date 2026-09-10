@@ -164,7 +164,7 @@ L1 never runs WASM.
 Slash v1 = equivocation only (two signed attestations).  
 Invalid-transition slash = re-execute + operator vote or later fraud game. Not ZK until a real circuit exists.
 
-Do not claim JKC “has Taproot + OP_CAT activated” unless you cite a JKC Core merge + activation height in-repo. If uncertain, write “planned.” Script builders must use Bitcoin script-num encoding. No 32-byte CHECKSIG keys. Incomplete CAT scripts must compile only behind `feature = "experimental-scripts"`.
+Do not claim JKC “has Taproot + OP_CAT activated” unless you cite a JKC Core merge + activation height in-repo. If uncertain, write “planned.” Script builders must use Bitcoin script-num encoding. No 32-byte CHECKSIG keys. Incomplete CAT scripts must compile only behind `feature = "experimental-scripts"`. Tapscript leaves must use BIP-342 x-only pubkeys (32 bytes) and individual `OP_CHECKSIG` (not `OP_CHECKMULTISIG`, which is disabled in tapscript). Script-path spends must use `TapSighashType::All`, not `Default`.
 
 Bonds: JKC locked in a documented vault template. No indexer token. Fees: optional extra output in the same user tx; Phase 1 fee may be 0.
 
@@ -209,15 +209,20 @@ Update README to match code: packages include `utxo-vmd`; model is L1.5; court s
 Do not add new ECONOMIC / PATENT / LaTeX files.
 If you touch scripts, add `docs/COURT.md` ≤ 40 lines: what L1 checks, what operators check, how a liar loses JKC, what is stub.
 
-**Current status:**
-- README lists 5 packages (omits `packages/node` / `utxo-vmd`) — needs update.
-- `docs/` contains ECONOMIC-MODEL.md, PATENT-ANALYSIS.md, .tex/.pdf files — legacy, do not add more.
-- `docs/COURT.md` does not exist — needs creation.
+**Active docs:**
+- `docs/TESTING.md` — full test suite documentation (every test file, how to run, live testnet results, BIP-342 fixes)
+- `docs/COURT.md` — court model (L1 checks, operator checks, slashing, stubs)
+- `docs/TRUST-MODEL.tex` — source of truth for trust model
+- `docs/LIFECYCLE.md` — smart object lifecycle
+- `docs/JKC-CHAIN-WORK.md` — JKC chain specifics (softforks, scripts)
+- `docs/WASM-ISA.md` — WASM ISA, ABI, determinism rules
+- `docs/CROSS-CHAIN-ARCHITECTURE.md` — cross-chain settlement (future/out of scope for v1)
 
-**Current status:**
-- README lists 5 packages (omits `packages/node` / `utxo-vmd`) — needs update.
-- `docs/` contains ECONOMIC-MODEL.md, PATENT-ANALYSIS.md, .tex/.pdf files — legacy, do not add more.
-- `docs/COURT.md` does not exist — needs creation.
+**Legacy docs** (moved to `docs/legacy/`, gitignored):
+- ECONOMIC-MODEL.md, PATENT-ANALYSIS.md, protocol-spec.md, etc.
+
+**Live testnet wallet** (outside repo, not committed):
+- `/home/sena/Documents/DedooProjects/PSOBProjects/jkc-testnet-wallet.md`
 
 ## PR discipline
 
@@ -242,6 +247,12 @@ Every PR: what can still lie, and whether that lie is slashable.
 - Equivocation true/false cases
 - Mock proof rejected when `cfg(test)` is off (or feature `allow-mock-zk` off)
 - Reorg: undo last object transition when JKC reorgs (if scanner exists)
+
+> **Full test documentation**: see `docs/TESTING.md` for every test file, how to run them, live testnet results, and production fixes discovered through live testing.
+>
+> **Live testnet status (2026-09-10)**: 10 transactions confirmed on JKC testnet, including the first real P2TR challenge slash tx. All 84 tests pass (60 offline + 24 live). BIP-342 compliance fixes applied to `l1_scripts.rs` (no CHECKMULTISIG in tapscript, x-only pubkeys, TapSighashType::All for script-path).
+>
+> **Wallet for live tests**: `/home/sena/Documents/DedooProjects/PSOBProjects/jkc-testnet-wallet.md` (not committed — outside repo).
 
 ## Voice
 

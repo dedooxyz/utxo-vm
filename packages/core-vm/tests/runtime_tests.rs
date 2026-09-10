@@ -156,7 +156,7 @@ fn test_compiled_assemblyscript_wasm_execution() {
                 &state,
                 "03deadbeef".to_string(),
                 "transfer",
-                b"{\"to\":\"02cafebabe\",\"amount\":500}",
+                b"{\"to\":\"02cafebabe\",\"amount\":1000000}",
             )
             .expect("Call failed");
 
