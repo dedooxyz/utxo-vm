@@ -55,7 +55,7 @@ When a WASM smart contract executes inside `core-vm`, it communicates with the h
 | `host_get_satoshis` | `() -> u64` | 100 | Returns native chain satoshis/base units locked in this UTXO |
 | `host_get_seal` | `(out_ptr: i32) -> i32` | 100 | Returns the input UTXO identifier (`txid:vout`) |
 | `host_emit_event` | `(topic_ptr: i32, data_ptr: i32, len: i32)` | 500 | Emits an indexable event log |
-| `host_create_object` | `(code_hash_ptr: i32, state_ptr: i32, satoshis: u64) -> i32` | 1000 | Spawns a child smart object (e.g. minted token) |
+| `host_create_object` | `(code_hash_ptr: i32, state_ptr: i32, state_len: i32, satoshis: u64) -> i32` | 1000 | Spawns a child smart object (e.g. minted token) |
 | `host_stealth_settle` | `(stealth_addr_ptr: i32, satoshis: u64) -> i32` | 500 | Authorizes a privacy extension / stealth settlement |
 | `host_mweb_peg_out` | `(stealth_addr_ptr: i32, satoshis: u64) -> i32` | 500 | Initiates MWEB peg-out to a stealth address |
 | `host_verify_groth16` | `(vk_ptr, vk_len, proof_ptr, proof_len, inputs_ptr, inputs_len: i32) -> i32` | 10000 | Verifies a Groth16 ZK proof (currently accepts mock proofs) |

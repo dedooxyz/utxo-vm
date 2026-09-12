@@ -11,7 +11,7 @@ export declare function host_get_seal(out_ptr: usize): i32;
 export declare function host_emit_event(topic_ptr: usize, data_ptr: usize, len: i32): void;
 
 @external("env", "host_create_object")
-export declare function host_create_object(code_hash_ptr: usize, state_ptr: usize, satoshis: u64): i32;
+export declare function host_create_object(code_hash_ptr: usize, state_ptr: usize, state_len: i32, satoshis: u64): i32;
 
 @external("env", "host_stealth_settle")
 export declare function host_stealth_settle(stealth_addr_ptr: usize, satoshis: u64): i32;
@@ -56,6 +56,7 @@ export class HostContext {
     return host_create_object(
       changetype<usize>(codeHashBuf),
       changetype<usize>(stateBuf),
+      stateBuf.byteLength,
       satoshis
     );
   }

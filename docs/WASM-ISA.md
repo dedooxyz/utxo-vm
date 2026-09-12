@@ -75,7 +75,7 @@ All host functions are registered under the `"env"` namespace:
 (import "env" "host_get_satoshis" (func $host_get_satoshis (result i64)))
 (import "env" "host_get_seal" (func $host_get_seal (param i32) (result i32)))
 (import "env" "host_emit_event" (func $host_emit_event (param i32 i32 i32)))
-(import "env" "host_create_object" (func $host_create_object (param i32 i32 i64) (result i32)))
+(import "env" "host_create_object" (func $host_create_object (param i32 i32 i32 i64) (result i32)))
 (import "env" "host_stealth_settle" (func $host_stealth_settle (param i32 i64) (result i32)))
 (import "env" "host_mweb_peg_out" (func $host_mweb_peg_out (param i32 i64) (result i32)))
 (import "env" "host_verify_groth16" (func $host_verify_groth16 (param i32 i32 i32 i32 i32 i32) (result i32)))

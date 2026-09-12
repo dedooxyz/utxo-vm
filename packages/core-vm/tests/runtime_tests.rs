@@ -499,3 +499,127 @@ fn test_runtime_hash_incorporates_wasmtime_version() {
         "Runtime hash must differ when Wasmtime version differs — \
          this ensures nodes running mismatched Wasmtime builds are detected");
 }
+
+#[test]
+fn test_host_create_object_preserves_binary_state_and_large_size() {
+    let wat = r#"
+        (module
+            (import "env" "host_create_object" (func $host_create_object (param i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 2)
+
+            (data (i32.const 0x0100) "child_contract_hash_12345")
+
+            (func (export "call") (param $method_ptr i32) (param $args_ptr i32) (param $args_len i32) (result i32)
+                (local $i i32)
+                (local.set $i (i32.const 0))
+                ;; Fill 1500 bytes starting at 0x1000 with 0xAA
+                (loop $fill
+                    (i32.store8 (i32.add (i32.const 0x1000) (local.get $i)) (i32.const 0xAA))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $fill (i32.lt_u (local.get $i) (i32.const 1500)))
+                )
+                ;; Embed a null byte at index 10 (0x100a)
+                (i32.store8 (i32.add (i32.const 0x1000) (i32.const 10)) (i32.const 0x00))
+                ;; Embed a marker byte well past 1024 bytes (at index 1200)
+                (i32.store8 (i32.add (i32.const 0x1000) (i32.const 1200)) (i32.const 0xBB))
+                ;; Call host_create_object: code_hash_ptr, state_ptr, state_len (1500), satoshis (75000)
+                (drop (call $host_create_object (i32.const 0x0100) (i32.const 0x1000) (i32.const 1500) (i64.const 75000)))
+                (i32.const 0)
+            )
+
+            (func (export "get_state") (param $out_ptr i32) (result i32)
+                (i32.const 0)
+            )
+        )
+    "#;
+
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+
+    let state = SmartObjectState {
+        object_id: "obj_parent".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "112233445566".to_string(),
+            vout: 0,
+        },
+        satoshis: 100_000,
+        owner_pubkey: "pubkey_alice".to_string(),
+        state_data: b"{}".to_vec(),
+    };
+
+    let result = runtime
+        .execute(
+            &wasm_bytes,
+            &state,
+            "pubkey_alice".to_string(),
+            "create_child",
+            b"",
+        )
+        .expect("Execution failed");
+
+    assert_eq!(result.return_code, 0);
+    assert_eq!(result.created_objects.len(), 1);
+    let created = &result.created_objects[0];
+    assert_eq!(created.code_hash, "child_contract_hash_12345");
+    assert_eq!(created.satoshis, 75000);
+
+    let mut expected_state = vec![0xAAu8; 1500];
+    expected_state[10] = 0x00;
+    expected_state[1200] = 0xBB;
+    assert_eq!(created.initial_state.len(), 1500);
+    assert_eq!(created.initial_state, expected_state);
+}
+
+#[test]
+fn test_host_create_object_exceeds_max_state_size_traps() {
+    let wat = r#"
+        (module
+            (import "env" "host_create_object" (func $host_create_object (param i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 1)
+
+            (data (i32.const 0x0100) "child_contract_hash")
+
+            (func (export "call") (param $method_ptr i32) (param $args_ptr i32) (param $args_len i32) (result i32)
+                ;; Request length 2MB which exceeds 1MB MAX_STATE_SIZE
+                (drop (call $host_create_object (i32.const 0x0100) (i32.const 0x0200) (i32.const 2097152) (i64.const 1000)))
+                (i32.const 0)
+            )
+
+            (func (export "get_state") (param $out_ptr i32) (result i32)
+                (i32.const 0)
+            )
+        )
+    "#;
+
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+
+    let state = SmartObjectState {
+        object_id: "obj_parent".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "112233445566".to_string(),
+            vout: 0,
+        },
+        satoshis: 100_000,
+        owner_pubkey: "pubkey_alice".to_string(),
+        state_data: b"{}".to_vec(),
+    };
+
+    let result = runtime.execute(
+        &wasm_bytes,
+        &state,
+        "pubkey_alice".to_string(),
+        "create_child",
+        b"",
+    );
+
+    assert!(result.is_err(), "Exceeding MAX_STATE_SIZE must trap execution");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("MAX_STATE_SIZE") || err.contains("trapped"),
+        "Error message should indicate trap / MAX_STATE_SIZE, got: {}",
+        err
+    );
+}

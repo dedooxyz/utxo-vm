@@ -191,23 +191,43 @@ impl VmRuntime {
             })
             .map_err(|e| e.to_string())?;
 
-        // host_create_object(code_hash_ptr: i32, state_ptr: i32, satoshis: u64) -> i32
+        // host_create_object(code_hash_ptr: i32, state_ptr: i32, state_len: i32, satoshis: u64) -> i32
         linker
-            .func_wrap("env", "host_create_object", |mut caller: Caller<'_, HostContext>, code_hash_ptr: i32, state_ptr: i32, satoshis: u64| -> i32 {
-                if let Ok(fuel) = caller.get_fuel() { let _ = caller.set_fuel(fuel.saturating_sub(fuel_costs::HOST_CREATE_OBJECT)); }
-                if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
-                    let code_hash = Self::read_guest_string(&caller, &mem, code_hash_ptr as usize, 64);
-                    let initial_state = Self::read_guest_string(&caller, &mem, state_ptr as usize, 1024);
-                    caller.data_mut().created_objects.push(CreatedObject {
-                        code_hash,
-                        initial_state: initial_state.into_bytes(),
-                        satoshis,
-                    });
-                    1
-                } else {
-                    0
-                }
-            })
+            .func_wrap(
+                "env",
+                "host_create_object",
+                |mut caller: Caller<'_, HostContext>,
+                 code_hash_ptr: i32,
+                 state_ptr: i32,
+                 state_len: i32,
+                 satoshis: u64|
+                 -> anyhow::Result<i32> {
+                    if let Ok(fuel) = caller.get_fuel() {
+                        let _ = caller.set_fuel(fuel.saturating_sub(fuel_costs::HOST_CREATE_OBJECT));
+                    }
+                    if state_len < 0 || (state_len as usize) > Self::MAX_STATE_SIZE {
+                        return Err(anyhow::anyhow!(
+                            "host_create_object: state size {} exceeds MAX_STATE_SIZE ({}) or is negative",
+                            state_len,
+                            Self::MAX_STATE_SIZE
+                        ));
+                    }
+                    if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
+                        let code_hash = Self::read_guest_string(&caller, &mem, code_hash_ptr as usize, 64);
+                        let mut initial_state = vec![0u8; state_len as usize];
+                        mem.read(&caller, state_ptr as usize, &mut initial_state)
+                            .map_err(|e| anyhow::anyhow!("host_create_object: failed to read guest memory: {}", e))?;
+                        caller.data_mut().created_objects.push(CreatedObject {
+                            code_hash,
+                            initial_state,
+                            satoshis,
+                        });
+                        Ok(1)
+                    } else {
+                        Err(anyhow::anyhow!("host_create_object: missing memory export"))
+                    }
+                },
+            )
             .map_err(|e| e.to_string())?;
 
         // host_stealth_settle(stealth_addr_ptr: i32, satoshis: u64) -> i32
@@ -304,6 +324,7 @@ impl VmRuntime {
     /// A future ABI revision could add a `get_state_size()` export to avoid
     /// this fixed cap.
     const GET_STATE_BUF_SIZE: usize = 64 * 1024;
+    pub const MAX_STATE_SIZE: usize = 1024 * 1024; // 1MB safety cap
 
     pub fn deploy(
         &self,
@@ -360,6 +381,8 @@ impl VmRuntime {
             if !init_args.is_empty() {
                 if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "deallocate") {
                     let _ = dealloc_fn.call(&mut store, (args_ptr, init_args.len() as i32));
+                } else if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), ()>(&mut store, "deallocate") {
+                    let _ = dealloc_fn.call(&mut store, (args_ptr, init_args.len() as i32));
                 }
             }
         }
@@ -402,6 +425,8 @@ impl VmRuntime {
 
             // Deallocate get_state buffer
             if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "deallocate") {
+                let _ = dealloc_fn.call(&mut store, (state_out_ptr, buf_size));
+            } else if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), ()>(&mut store, "deallocate") {
                 let _ = dealloc_fn.call(&mut store, (state_out_ptr, buf_size));
             }
         }
@@ -470,6 +495,8 @@ impl VmRuntime {
 
         let deallocate_guest = |store: &mut Store<HostContext>, ptr: i32, size: i32| {
             if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut *store, "deallocate") {
+                let _ = dealloc_fn.call(&mut *store, (ptr, size));
+            } else if let Ok(dealloc_fn) = instance.get_typed_func::<(i32, i32), ()>(&mut *store, "deallocate") {
                 let _ = dealloc_fn.call(&mut *store, (ptr, size));
             }
         };
