@@ -1,4 +1,5 @@
 import { HostContext } from "./env";
+import { escapeJsonString } from "./json";
 
 /**
  * Smart Object Token (SOT)
@@ -64,12 +65,12 @@ export class SmartObjectToken {
 
   toJson(): string {
     return "{"
-      + "\"name\":\"" + this.name + "\","
-      + "\"symbol\":\"" + this.symbol + "\","
+      + "\"name\":\"" + escapeJsonString(this.name) + "\","
+      + "\"symbol\":\"" + escapeJsonString(this.symbol) + "\","
       + "\"decimals\":" + this.decimals.toString() + ","
       + "\"totalSupply\":\"" + this.totalSupply.toString() + "\","
       + "\"balance\":\"" + this.balance.toString() + "\","
-      + "\"owner\":\"" + this.owner + "\""
+      + "\"owner\":\"" + escapeJsonString(this.owner) + "\""
       + "}";
   }
 }

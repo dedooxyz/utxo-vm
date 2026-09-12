@@ -1,4 +1,5 @@
 import { HostContext } from "./env";
+import { escapeJsonString } from "./json";
 
 /**
  * Smart Object NFT (SON)
@@ -40,10 +41,10 @@ export class SmartObjectNFT {
 
   toJson(): string {
     return "{"
-      + "\"collectionName\":\"" + this.collectionName + "\","
+      + "\"collectionName\":\"" + escapeJsonString(this.collectionName) + "\","
       + "\"tokenId\":\"" + this.tokenId.toString() + "\","
-      + "\"metadataUri\":\"" + this.metadataUri + "\","
-      + "\"owner\":\"" + this.owner + "\""
+      + "\"metadataUri\":\"" + escapeJsonString(this.metadataUri) + "\","
+      + "\"owner\":\"" + escapeJsonString(this.owner) + "\""
       + "}";
   }
 }

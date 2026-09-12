@@ -623,3 +623,127 @@ fn test_host_create_object_exceeds_max_state_size_traps() {
         err
     );
 }
+
+#[test]
+fn test_contract_json_parsing_escaped_quotes_and_whitespace() {
+    let wasm_path = Path::new("../contracts/build/release.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+    let wasm_bytes = fs::read(wasm_path).expect("Failed to read release.wasm");
+    let runtime = VmRuntime::new(VmConfig::default());
+
+    let seal = SingleUseSeal {
+        txid: "aabbccdd11223344".to_string(),
+        vout: 1,
+    };
+
+    // Deploy with escaped quotes in token name
+    let deploy_res = runtime
+        .deploy(
+            &wasm_bytes,
+            "03deadbeef".to_string(),
+            seal.clone(),
+            50_000,
+            br#"{"name":"Special\"Token\"Escaped","symbol":"STE","decimals":8,"totalSupply":1000000,"balance":1000000,"owner":"03deadbeef"}"#,
+        )
+        .expect("Deploy failed");
+
+    assert_eq!(deploy_res.return_code, 0);
+
+    let state = SmartObjectState {
+        object_id: "obj_ste_1".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal,
+        satoshis: 50_000,
+        owner_pubkey: "03deadbeef".to_string(),
+        state_data: deploy_res.updated_state_data,
+    };
+
+    // Call with whitespace (newlines, tabs, spaces around punctuation)
+    let call_res = runtime
+        .execute(
+            &wasm_bytes,
+            &state,
+            "03deadbeef".to_string(),
+            "transfer",
+            b"{\n\t\"to\":\t\"03deadbeef\",\r\n\t\"amount\":\t1000000\n}",
+        )
+        .expect("Call execution failed");
+
+    assert_eq!(call_res.return_code, 0);
+    let state_str = String::from_utf8_lossy(&call_res.updated_state_data);
+    assert!(state_str.contains("Special") && state_str.contains("Token"));
+}
+
+#[test]
+fn test_contract_json_parsing_malformed_returns_error_code() {
+    let wasm_path = Path::new("../contracts/build/release.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+    let wasm_bytes = fs::read(wasm_path).expect("Failed to read release.wasm");
+    let runtime = VmRuntime::new(VmConfig::default());
+
+    let seal = SingleUseSeal {
+        txid: "aabbccdd11223344".to_string(),
+        vout: 1,
+    };
+
+    // Deploy with malformed JSON: missing value
+    let bad_deploy = runtime
+        .deploy(
+            &wasm_bytes,
+            "03deadbeef".to_string(),
+            seal.clone(),
+            50_000,
+            b"{\"name\": \"Bad\", \"unclosed\": ",
+        )
+        .expect("Deploy wasm invocation failed");
+
+    assert_ne!(bad_deploy.return_code, 0, "Malformed init JSON must return non-zero error code");
+
+    // Deploy valid contract to test call with malformed args
+    let deploy_res = runtime
+        .deploy(
+            &wasm_bytes,
+            "03deadbeef".to_string(),
+            seal.clone(),
+            50_000,
+            b"{\"name\":\"TestCoin\",\"symbol\":\"TC\",\"decimals\":8,\"totalSupply\":1000000,\"balance\":1000000,\"owner\":\"03deadbeef\"}",
+        )
+        .expect("Deploy failed");
+
+    let state = SmartObjectState {
+        object_id: "obj_testcoin_1".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal,
+        satoshis: 50_000,
+        owner_pubkey: "03deadbeef".to_string(),
+        state_data: deploy_res.updated_state_data,
+    };
+
+    // Call with malformed args: missing value
+    let bad_call1 = runtime
+        .execute(
+            &wasm_bytes,
+            &state,
+            "03deadbeef".to_string(),
+            "transfer",
+            b"{\"to\": \"02cafebabe\", \"amount\": }",
+        )
+        .expect("Execution failed");
+    assert_ne!(bad_call1.return_code, 0, "Malformed args must return non-zero error code");
+
+    // Call with non-JSON args
+    let bad_call2 = runtime
+        .execute(
+            &wasm_bytes,
+            &state,
+            "03deadbeef".to_string(),
+            "transfer",
+            b"not_json_data",
+        )
+        .expect("Execution failed");
+    assert_ne!(bad_call2.return_code, 0, "Non-JSON args must return non-zero error code");
+}

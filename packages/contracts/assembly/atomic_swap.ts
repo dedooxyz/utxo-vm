@@ -1,4 +1,5 @@
 import { HostContext } from "./env";
+import { escapeJsonString } from "./json";
 
 export class AtomicSwapOrder {
   maker: string;
@@ -39,7 +40,7 @@ export class AtomicSwapOrder {
 
   toJson(): string {
     return "{"
-      + "\"maker\":\"" + this.maker + "\","
+      + "\"maker\":\"" + escapeJsonString(this.maker) + "\","
       + "\"offeredTokenId\":\"" + this.offeredTokenId.toString() + "\","
       + "\"demandedSatoshis\":\"" + this.demandedSatoshis.toString() + "\","
       + "\"isFilled\":" + (this.isFilled ? "true" : "false") + ","

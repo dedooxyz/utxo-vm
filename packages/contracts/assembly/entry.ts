@@ -1,4 +1,5 @@
 import { HostContext } from "./env";
+import { JsonParser, JsonValue, JsonType } from "./json";
 import { SmartObjectToken } from "./sot";
 import { SmartObjectNFT } from "./son";
 import { NativeVault } from "./native_vault";
@@ -10,77 +11,61 @@ let globalStateJson: string = "{}";
 let contractType: string = "";
 
 export function allocate(size: i32): usize {
-  let buf = new ArrayBuffer(size);
-  return changetype<usize>(buf);
+  return heap.alloc(size);
 }
 
-export function deallocate(ptr: usize, size: i32): void {
-  // AssemblyScript manages garbage collection automatically
+export function deallocate(ptr: usize, size: i32): i32 {
+  heap.free(ptr);
+  return 0;
 }
 
-// Simple JSON value extractor (for flat JSON objects)
-function jsonGetString(json: string, key: string): string {
-  let search = "\"" + key + "\":\"";
-  let start = json.indexOf(search);
-  if (start < 0) return "";
-  start += search.length;
-  let end = json.indexOf("\"", start);
-  if (end < 0) return "";
-  return json.substring(start, end);
+// JSON value extractor helpers backed by robust JsonParser
+export function jsonGetString(json: string, key: string): string {
+  let parser = new JsonParser(json);
+  let v = parser.parse();
+  if (v == null) return "";
+  return v.getString(key);
 }
 
-function jsonGetInt(json: string, key: string): i64 {
-  let search = "\"" + key + "\":";
-  let start = json.indexOf(search);
-  if (start < 0) return 0;
-  let valueStart = start + search.length;
-  // Skip whitespace
-  while (valueStart < json.length && json.charCodeAt(valueStart) == 32) {
-    valueStart++;
-  }
-  // Handle quoted numbers like "1000000"
-  if (valueStart < json.length && json.charCodeAt(valueStart) == 34) {
-    // Quoted number
-    valueStart++;
-    let end = valueStart;
-    while (end < json.length && json.charCodeAt(end) != 34) {
-      end++;
-    }
-    if (end == valueStart) return 0;
-    return I64.parseInt(json.substring(valueStart, end));
-  }
-  // Handle unquoted numbers
-  let end = valueStart;
-  while (end < json.length && json.charCodeAt(end) >= 48 && json.charCodeAt(end) <= 57) {
-    end++;
-  }
-  if (end == valueStart) return 0;
-  return I64.parseInt(json.substring(valueStart, end));
+export function jsonGetInt(json: string, key: string): i64 {
+  let parser = new JsonParser(json);
+  let v = parser.parse();
+  if (v == null) return 0;
+  return v.getInt(key);
 }
 
-function jsonGetBool(json: string, key: string): bool {
-  let search = "\"" + key + "\":";
-  let start = json.indexOf(search);
-  if (start < 0) return false;
-  start += search.length;
-  // Skip whitespace
-  while (start < json.length && json.charCodeAt(start) == 32) {
-    start++;
+export function jsonGetBool(json: string, key: string): bool {
+  let parser = new JsonParser(json);
+  let v = parser.parse();
+  if (v == null) return false;
+  return v.getBool(key);
+}
+
+function readCString(ptr: usize, maxLen: i32 = 64): string {
+  let len = 0;
+  while (len < maxLen && load<u8>(ptr + len) != 0) {
+    len++;
   }
-  let val = json.substring(start, start + 4);
-  return val == "true";
+  return len > 0 ? String.UTF8.decodeUnsafe(ptr, len, true) : "";
 }
 
 export function init(args_ptr: usize, args_len: i32): i32 {
   let args = args_len > 0 ? String.UTF8.decodeUnsafe(args_ptr, args_len, true) : "{}";
 
+  let parser = new JsonParser(args);
+  let parsed = parser.parse();
+  if (parsed == null || parsed.type != JsonType.Object) {
+    HostContext.emitEvent("Error", "Invalid init JSON: " + parser.errorMsg);
+    return 1;
+  }
+
   // Parse init args to determine contract type
-  contractType = jsonGetString(args, "type");
+  contractType = parsed.getString("type");
 
   // Default to SOT if no type specified (backward compatibility)
   if (contractType.length == 0) {
     // Check if it looks like a token (has symbol field)
-    if (jsonGetString(args, "symbol").length > 0) {
+    if (parsed.getString("symbol").length > 0) {
       contractType = "SOT";
     }
   }
@@ -93,62 +78,78 @@ export function init(args_ptr: usize, args_len: i32): i32 {
 }
 
 export function call(method_ptr: usize, args_ptr: usize, args_len: i32): i32 {
-  let method = String.UTF8.decodeUnsafe(method_ptr, 64, true);
+  let method = readCString(method_ptr, 64);
   let args = args_len > 0 ? String.UTF8.decodeUnsafe(args_ptr, args_len, true) : "{}";
+
+  // Validate args JSON
+  let argsParser = new JsonParser(args);
+  let parsedArgs = argsParser.parse();
+  if (parsedArgs == null || parsedArgs.type != JsonType.Object) {
+    HostContext.emitEvent("Error", "Invalid call args JSON: " + argsParser.errorMsg);
+    return 1;
+  }
+
+  // Validate global state JSON
+  let stateParser = new JsonParser(globalStateJson);
+  let parsedState = stateParser.parse();
+  if (parsedState == null || parsedState.type != JsonType.Object) {
+    HostContext.emitEvent("Error", "Invalid contract state JSON: " + stateParser.errorMsg);
+    return 1;
+  }
 
   HostContext.emitEvent("CallInvoked", "method=" + method + " args=" + args);
 
   // Dispatch based on contract type and method
   if (contractType == "SOT" || contractType == "UTX20") {
-    return callSOT(method, args);
+    return callSOT(method, parsedState, parsedArgs);
   } else if (contractType == "SON" || contractType == "UTX721") {
-    return callSON(method, args);
+    return callSON(method, parsedState, parsedArgs);
   } else if (contractType == "NativeVault") {
-    return callNativeVault(method, args);
+    return callNativeVault(method, parsedState, parsedArgs);
   } else if (contractType == "AtomicSwap") {
-    return callAtomicSwap(method, args);
+    return callAtomicSwap(method, parsedState, parsedArgs);
   } else {
     HostContext.emitEvent("Error", "Unknown contract type: " + contractType);
     return 1;
   }
 }
 
-function callSOT(method: string, args: string): i32 {
-  let name = jsonGetString(globalStateJson, "name");
-  let symbol = jsonGetString(globalStateJson, "symbol");
-  let decimals = <u8>jsonGetInt(globalStateJson, "decimals");
-  let totalSupply = <u64>jsonGetInt(globalStateJson, "totalSupply");
-  let balance = <u64>jsonGetInt(globalStateJson, "balance");
-  let owner = jsonGetString(globalStateJson, "owner");
+function callSOT(method: string, state: JsonValue, args: JsonValue): i32 {
+  let name = state.getString("name");
+  let symbol = state.getString("symbol");
+  let decimals = <u8>state.getInt("decimals");
+  let totalSupply = <u64>state.getInt("totalSupply");
+  let balance = <u64>state.getInt("balance");
+  let owner = state.getString("owner");
 
   let token = new SmartObjectToken(name, symbol, decimals, totalSupply, owner);
   token.balance = balance;
 
   if (method == "transfer") {
-    let to = jsonGetString(args, "to");
-    let amount = <u64>jsonGetInt(args, "amount");
+    let to = args.getString("to");
+    let amount = <u64>args.getInt("amount");
 
     let newToken = token.transfer(to, amount);
     globalStateJson = newToken.toJson();
     HostContext.emitEvent("TransferComplete", globalStateJson);
     return 0;
   } else if (method == "mint") {
-    let to = jsonGetString(args, "to");
-    let amount = <u64>jsonGetInt(args, "amount");
+    let to = args.getString("to");
+    let amount = <u64>args.getInt("amount");
 
     let newToken = token.mint(to, amount);
     globalStateJson = newToken.toJson();
     HostContext.emitEvent("MintComplete", globalStateJson);
     return 0;
   } else if (method == "burn") {
-    let amount = <u64>jsonGetInt(args, "amount");
+    let amount = <u64>args.getInt("amount");
 
     token.burn(amount);
     globalStateJson = token.toJson();
     HostContext.emitEvent("BurnComplete", globalStateJson);
     return 0;
   } else if (method == "balanceOf") {
-    let addr = jsonGetString(args, "address");
+    let addr = args.getString("address");
     // Return balance for address (simplified - only owner for now)
     if (addr == owner) {
       HostContext.emitEvent("Balance", balance.toString());
@@ -162,23 +163,23 @@ function callSOT(method: string, args: string): i32 {
   }
 }
 
-function callSON(method: string, args: string): i32 {
-  let collectionName = jsonGetString(globalStateJson, "collectionName");
-  let tokenId = <u64>jsonGetInt(globalStateJson, "tokenId");
-  let metadataUri = jsonGetString(globalStateJson, "metadataUri");
-  let owner = jsonGetString(globalStateJson, "owner");
+function callSON(method: string, state: JsonValue, args: JsonValue): i32 {
+  let collectionName = state.getString("collectionName");
+  let tokenId = <u64>state.getInt("tokenId");
+  let metadataUri = state.getString("metadataUri");
+  let owner = state.getString("owner");
 
   let nft = new SmartObjectNFT(collectionName, tokenId, metadataUri, owner);
 
   if (method == "transfer") {
-    let to = jsonGetString(args, "to");
+    let to = args.getString("to");
 
     nft.transfer(to);
     globalStateJson = nft.toJson();
     HostContext.emitEvent("NFTTransferComplete", globalStateJson);
     return 0;
   } else if (method == "setMetadataUri") {
-    let newUri = jsonGetString(args, "uri");
+    let newUri = args.getString("uri");
 
     nft.setMetadataUri(newUri);
     globalStateJson = nft.toJson();
@@ -195,9 +196,9 @@ function callSON(method: string, args: string): i32 {
   }
 }
 
-function callNativeVault(method: string, args: string): i32 {
-  let totalLockedSatoshis = <u64>jsonGetInt(globalStateJson, "totalLockedSatoshis");
-  let vaultOwner = jsonGetString(globalStateJson, "vaultOwner");
+function callNativeVault(method: string, state: JsonValue, args: JsonValue): i32 {
+  let totalLockedSatoshis = <u64>state.getInt("totalLockedSatoshis");
+  let vaultOwner = state.getString("vaultOwner");
 
   let vault = new NativeVault(vaultOwner);
   vault.totalLockedSatoshis = totalLockedSatoshis;
@@ -208,8 +209,8 @@ function callNativeVault(method: string, args: string): i32 {
     HostContext.emitEvent("DepositComplete", globalStateJson);
     return 0;
   } else if (method == "withdrawToStealth") {
-    let stealthAddress = jsonGetString(args, "stealthAddress");
-    let amount = <u64>jsonGetInt(args, "amount");
+    let stealthAddress = args.getString("stealthAddress");
+    let amount = <u64>args.getInt("amount");
 
     let ok = vault.withdrawToStealth(stealthAddress, amount);
     if (ok) {
@@ -223,19 +224,19 @@ function callNativeVault(method: string, args: string): i32 {
   }
 }
 
-function callAtomicSwap(method: string, args: string): i32 {
-  let maker = jsonGetString(globalStateJson, "maker");
-  let offeredTokenId = <u64>jsonGetInt(globalStateJson, "offeredTokenId");
-  let demandedSatoshis = <u64>jsonGetInt(globalStateJson, "demandedSatoshis");
-  let isFilled = jsonGetBool(globalStateJson, "isFilled");
-  let isCancelled = jsonGetBool(globalStateJson, "isCancelled");
+function callAtomicSwap(method: string, state: JsonValue, args: JsonValue): i32 {
+  let maker = state.getString("maker");
+  let offeredTokenId = <u64>state.getInt("offeredTokenId");
+  let demandedSatoshis = <u64>state.getInt("demandedSatoshis");
+  let isFilled = state.getBool("isFilled");
+  let isCancelled = state.getBool("isCancelled");
 
   let order = new AtomicSwapOrder(maker, offeredTokenId, demandedSatoshis);
   order.isFilled = isFilled;
   order.isCancelled = isCancelled;
 
   if (method == "fill") {
-    let taker = jsonGetString(args, "taker");
+    let taker = args.getString("taker");
 
     let ok = order.fill(taker);
     if (ok) {
@@ -270,11 +271,21 @@ export function get_state_size(): i32 {
 
 export function restore_state(state_ptr: usize, state_len: i32): i32 {
   if (state_len <= 0) return 0;
-  globalStateJson = String.UTF8.decodeUnsafe(state_ptr, state_len, true);
+  let stateStr = String.UTF8.decodeUnsafe(state_ptr, state_len, true);
+
+  let parser = new JsonParser(stateStr);
+  let parsed = parser.parse();
+  if (parsed == null || parsed.type != JsonType.Object) {
+    HostContext.emitEvent("Error", "Invalid restore_state JSON: " + parser.errorMsg);
+    return 1;
+  }
+
+  globalStateJson = stateStr;
+
   // Re-detect contract type from restored state
-  contractType = jsonGetString(globalStateJson, "type");
+  contractType = parsed.getString("type");
   if (contractType.length == 0) {
-    if (jsonGetString(globalStateJson, "symbol").length > 0) {
+    if (parsed.getString("symbol").length > 0) {
       contractType = "SOT";
     }
   }

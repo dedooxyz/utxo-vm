@@ -1,4 +1,5 @@
 import { HostContext } from "./env";
+import { escapeJsonString } from "./json";
 
 export class NativeVault {
   totalLockedSatoshis: u64;
@@ -34,7 +35,7 @@ export class NativeVault {
   toJson(): string {
     return "{"
       + "\"totalLockedSatoshis\":\"" + this.totalLockedSatoshis.toString() + "\","
-      + "\"vaultOwner\":\"" + this.vaultOwner + "\""
+      + "\"vaultOwner\":\"" + escapeJsonString(this.vaultOwner) + "\""
       + "}";
   }
 }
