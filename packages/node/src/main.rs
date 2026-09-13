@@ -138,13 +138,6 @@ struct Cli {
     #[arg(long, env = "FRAUD_WATCH_BOND_AMOUNT")]
     fraud_watch_bond_amount: Option<u64>,
 
-    /// Comma-separated hex-encoded watcher signatures to embed in the
-    /// challenge transaction witness. Format: "sig1hex,sig2hex,...".
-    /// In a real deployment these come from M-of-N co-signers; for the
-    /// automatic single-node path they are configured statically here.
-    #[arg(long, env = "FRAUD_WATCH_WATCHER_SIGS", value_delimiter = ',')]
-    fraud_watch_watcher_sigs: Vec<String>,
-
     /// Miner fee (satoshis) deducted from the bond amount when building a
     /// challenge transaction.
     #[arg(long, env = "FRAUD_WATCH_MINER_FEE", default_value_t = 1000)]
@@ -194,7 +187,6 @@ impl FraudWatchVaultConfigJson {
 struct FraudWatchConfig {
     vault_config: VaultConfig,
     bond_input: ChallengeInput,
-    watcher_signatures: Vec<Vec<u8>>,
     miner_fee: u64,
 }
 
@@ -219,20 +211,6 @@ fn load_fraud_watch_config(cli: &Cli) -> Result<Option<FraudWatchConfig>> {
         anyhow::anyhow!("--fraud-watch-bond-amount is required when --fraud-watch-vault-config is set")
     })?;
 
-    let watcher_signatures = cli
-        .fraud_watch_watcher_sigs
-        .iter()
-        .map(|h| hex::decode(h).context("fraud_watch_watcher_sigs"))
-        .collect::<Result<Vec<_>>>()?;
-
-    if watcher_signatures.len() < vault_config.watcher_threshold as usize {
-        return Err(anyhow::anyhow!(
-            "fraud-watch: {} watcher signatures configured but vault requires {} (M-of-N)",
-            watcher_signatures.len(),
-            vault_config.watcher_threshold
-        ));
-    }
-
     Ok(Some(FraudWatchConfig {
         vault_config,
         bond_input: ChallengeInput {
@@ -240,7 +218,6 @@ fn load_fraud_watch_config(cli: &Cli) -> Result<Option<FraudWatchConfig>> {
             bond_vout,
             bond_amount,
         },
-        watcher_signatures,
         miner_fee: cli.fraud_watch_miner_fee,
     }))
 }
@@ -304,11 +281,12 @@ async fn main() -> Result<()> {
         let status = utxo_vmd::consensus::l1_scripts::query_softfork_status(rpc_url)
             .await
             .context("Failed to query JKC chain capabilities")?;
-        info!("[Bonding] CSV={}, SegWit={}, Taproot={}",
-            status.csv_active, status.segwit_active, status.taproot_active);
+        info!("[Bonding] CSV={}, SegWit={}, Taproot={}, DisabledOpcodes={}",
+            status.csv_active, status.segwit_active, status.taproot_active,
+            status.disabled_opcodes_active);
         utxo_vmd::consensus::l1_scripts::assert_chain_supports_bonding(&status)
             .context("Chain capability check failed — bonding disabled")?;
-        info!("[Bonding] Chain supports CSV+Taproot — bonding enabled.");
+        info!("[Bonding] Chain supports CSV+Taproot+OP_CAT — bonding enabled.");
     }
 
     // Create database parent directories if needed
@@ -775,7 +753,6 @@ async fn maybe_broadcast_challenge(
         &proof,
         &cfg.bond_input,
         &cfg.vault_config,
-        &cfg.watcher_signatures,
         cfg.miner_fee,
     ) {
         Ok(t) => t,

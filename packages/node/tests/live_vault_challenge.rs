@@ -133,13 +133,16 @@ async fn live_deploy_p2tr_vault_and_challenge() {
     println!("[LIVE] Challenger x-only: {}", challenger_xonly);
 
     // Build the vault script tree using l1_scripts
+    // Use x-only (32-byte) pubkeys for BIP-340 Schnorr + tapscript
+    let op_pk_xonly = &op_pk_comp[1..];
+    let challenger_pk_xonly = &challenger_pk_comp[1..];
     let vault_config = l1_scripts::VaultConfig {
-        operator_pubkey: op_pk_comp.to_vec(),
-        challenger_pubkey: challenger_pk_comp.to_vec(),
+        operator_pubkey: op_pk_xonly.to_vec(),
+        challenger_pubkey: challenger_pk_xonly.to_vec(),
         unbond_delay: 60,
         claim_delay: 10,
-        watcher_pubkeys: vec![challenger_pk_comp.to_vec()],
-        watcher_threshold: 1,
+        watcher_pubkeys: vec![],
+        watcher_threshold: 0,
     };
 
     let vault_tree = l1_scripts::build_vault_script_tree(&vault_config)
@@ -254,7 +257,7 @@ async fn live_deploy_p2tr_vault_and_challenge() {
 
     // Create an equivocation proof
     let mgr = ConsensusManager::new(1);
-    let op_pk_hex = hex::encode(&op_pk_comp);
+    let op_pk_hex = hex::encode(&op_pk_comp[1..]); // x-only for Schnorr
     mgr.register_validator(&op_pk_hex);
 
     let root_honest = hex::encode(Sha256::digest(b"vault_honest_root"));

@@ -1,18 +1,29 @@
 use secp256k1::Secp256k1;
 use utxo_vmd::consensus::ConsensusManager;
 
+/// Helper: generate a keypair and return (secret_key, x_only_pubkey_hex).
+/// BIP-340 Schnorr uses 32-byte x-only pubkeys, not 33-byte compressed.
+fn gen_xonly_keypair() -> (secp256k1::SecretKey, String) {
+    let secp = Secp256k1::new();
+    let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+    let (_, parity) = pk.x_only_public_key();
+    // x-only pubkey is the 32-byte serialization (drops the parity byte)
+    let xonly_hex = hex::encode(&pk.serialize()[1..]);
+    let _ = parity; // parity not needed for registration, only for key-tweak
+    (sk, xonly_hex)
+}
+
 #[test]
 fn test_consensus_quorum_threshold() {
-    let secp = Secp256k1::new();
-    let (sk1, pk1) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-    let (sk2, pk2) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-    let (sk3, pk3) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+    let (sk1, pk1_hex) = gen_xonly_keypair();
+    let (sk2, pk2_hex) = gen_xonly_keypair();
+    let (sk3, pk3_hex) = gen_xonly_keypair();
 
     // Require 2-of-3 quorum
     let consensus = ConsensusManager::new(2);
-    consensus.register_validator(&hex::encode(pk1.serialize()));
-    consensus.register_validator(&hex::encode(pk2.serialize()));
-    consensus.register_validator(&hex::encode(pk3.serialize()));
+    consensus.register_validator(&pk1_hex);
+    consensus.register_validator(&pk2_hex);
+    consensus.register_validator(&pk3_hex);
 
     let chain = "JKC";
     let height = 1000;
@@ -45,11 +56,10 @@ fn test_consensus_quorum_threshold() {
 
 #[test]
 fn test_equivocation_slashing_proof_capture() {
-    let secp = Secp256k1::new();
-    let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+    let (sk, pk_hex) = gen_xonly_keypair();
 
     let consensus = ConsensusManager::new(1);
-    consensus.register_validator(&hex::encode(pk.serialize()));
+    consensus.register_validator(&pk_hex);
 
     let chain = "DOGE";
     let height = 250;
@@ -70,7 +80,7 @@ fn test_equivocation_slashing_proof_capture() {
     // Verify slashing proof was automatically registered
     let proofs = consensus.get_slashing_proofs();
     assert_eq!(proofs.len(), 1);
-    assert_eq!(proofs[0].validator_pubkey, hex::encode(pk.serialize()));
+    assert_eq!(proofs[0].validator_pubkey, pk_hex);
     assert_eq!(proofs[0].first_attestation.state_root, "canonical_state_root");
     assert_eq!(proofs[0].second_attestation.state_root, "fork_state_root_evil");
 

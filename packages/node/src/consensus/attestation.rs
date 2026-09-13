@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use anyhow::Result;
-use secp256k1::ecdsa::Signature;
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 use crate::types::{EquivocationProof, QuorumDivergenceProof, QuorumResult, StateAttestation};
 
@@ -77,6 +76,34 @@ fn compute_attestation_merkle_root(attestations: &[StateAttestation]) -> String 
     hex::encode(level[0])
 }
 
+/// Serialize the attestation preimage (the bytes that get SHA256'd to produce
+/// the message the operator signs). This is the same format as
+/// `hash_attestation_payload` but returns the raw bytes instead of the hash,
+/// so the covenant challenge leaf can reconstruct and hash them on-chain
+/// via OP_CAT + OP_SHA256, then verify the operator's signature.
+///
+/// Format (v1):
+///   "UTXO_VM_ATTESTATION_V1" || u32(len(chain)) || chain
+///   || u64(height) || u32(len(block_hash)) || block_hash
+///   || u32(len(state_root)) || state_root
+pub fn serialize_attestation_preimage(
+    chain: &str,
+    height: u64,
+    block_hash: &str,
+    state_root: &str,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"UTXO_VM_ATTESTATION_V1");
+    out.extend_from_slice(&(chain.len() as u32).to_be_bytes());
+    out.extend_from_slice(chain.as_bytes());
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&(block_hash.len() as u32).to_be_bytes());
+    out.extend_from_slice(block_hash.as_bytes());
+    out.extend_from_slice(&(state_root.len() as u32).to_be_bytes());
+    out.extend_from_slice(state_root.as_bytes());
+    out
+}
+
 pub struct ConsensusManager {
     secp: Secp256k1<secp256k1::All>,
     pub known_validators: Arc<RwLock<HashSet<String>>>, // Set of hex pubkeys
@@ -121,16 +148,8 @@ impl ConsensusManager {
     /// be confused. Changing this string is a consensus-breaking action and
     /// requires coordinated rollout across all validator operators.
     pub fn hash_attestation_payload(chain: &str, height: u64, block_hash: &str, state_root: &str) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(b"UTXO_VM_ATTESTATION_V1");
-        hasher.update(&(chain.len() as u32).to_be_bytes());
-        hasher.update(chain.as_bytes());
-        hasher.update(&height.to_be_bytes());
-        hasher.update(&(block_hash.len() as u32).to_be_bytes());
-        hasher.update(block_hash.as_bytes());
-        hasher.update(&(state_root.len() as u32).to_be_bytes());
-        hasher.update(state_root.as_bytes());
-        let res = hasher.finalize();
+        let preimage = serialize_attestation_preimage(chain, height, block_hash, state_root);
+        let res = Sha256::digest(&preimage);
         let mut out = [0u8; 32];
         out.copy_from_slice(&res);
         out
@@ -146,26 +165,31 @@ impl ConsensusManager {
     ) -> Result<StateAttestation> {
         let digest = Self::hash_attestation_payload(chain, height, block_hash, state_root);
         let msg = Message::from_digest(digest);
-        let sig = self.secp.sign_ecdsa(&msg, secret_key);
-        let pubkey = PublicKey::from_secret_key(&self.secp, secret_key);
+        // BIP-340 Schnorr signature (64 bytes). Tapscript-native, verifiable
+        // on-chain via OP_CHECKSIG with x-only pubkey (32 bytes).
+        let keypair = secp256k1::Keypair::from_secret_key(&self.secp, secret_key);
+        let (xonly_pubkey, _) = keypair.x_only_public_key();
+        let sig = self.secp.sign_schnorr_with_rng(&msg, &keypair, &mut secp256k1::rand::rngs::OsRng);
 
         Ok(StateAttestation {
             chain: chain.to_string(),
             block_height: height,
             block_hash: block_hash.to_string(),
             state_root: state_root.to_string(),
-            validator_pubkey: hex::encode(pubkey.serialize()),
-            signature_hex: hex::encode(sig.serialize_compact()),
+            // x-only pubkey (32 bytes hex) — tapscript uses 32-byte x-only keys
+            validator_pubkey: hex::encode(xonly_pubkey.serialize()),
+            signature_hex: hex::encode(sig.serialize()),
             timestamp: chrono::Utc::now().timestamp(),
         })
     }
 
     pub fn verify_attestation(&self, attestation: &StateAttestation) -> bool {
+        // BIP-340 Schnorr verification with x-only pubkey (32 bytes).
         let pubkey_bytes = match hex::decode(&attestation.validator_pubkey) {
             Ok(b) => b,
             Err(_) => return false,
         };
-        let pubkey = match PublicKey::from_slice(&pubkey_bytes) {
+        let xonly_pubkey = match XOnlyPublicKey::from_slice(&pubkey_bytes) {
             Ok(pk) => pk,
             Err(_) => return false,
         };
@@ -174,7 +198,7 @@ impl ConsensusManager {
             Ok(b) => b,
             Err(_) => return false,
         };
-        let sig = match Signature::from_compact(&sig_bytes) {
+        let sig = match secp256k1::schnorr::Signature::from_slice(&sig_bytes) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -187,7 +211,7 @@ impl ConsensusManager {
         );
         let msg = Message::from_digest(digest);
 
-        self.secp.verify_ecdsa(&msg, &sig, &pubkey).is_ok()
+        self.secp.verify_schnorr(&sig, &msg, &xonly_pubkey).is_ok()
     }
 
     pub fn add_attestation(&self, attestation: StateAttestation) -> bool {
@@ -425,13 +449,13 @@ pub fn verify_equivocation_proof(proof: &EquivocationProof) -> bool {
         return false;
     }
 
-    // 4. Both signatures must be cryptographically valid
+    // 4. Both signatures must be cryptographically valid (BIP-340 Schnorr)
     let secp = secp256k1::Secp256k1::new();
     let pubkey_bytes = match hex::decode(&proof.validator_pubkey) {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let pubkey = match secp256k1::PublicKey::from_slice(&pubkey_bytes) {
+    let xonly_pubkey = match secp256k1::XOnlyPublicKey::from_slice(&pubkey_bytes) {
         Ok(pk) => pk,
         Err(_) => return false,
     };
@@ -441,7 +465,7 @@ pub fn verify_equivocation_proof(proof: &EquivocationProof) -> bool {
             Ok(b) => b,
             Err(_) => return false,
         };
-        let sig = match secp256k1::ecdsa::Signature::from_compact(&sig_bytes) {
+        let sig = match secp256k1::schnorr::Signature::from_slice(&sig_bytes) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -457,7 +481,7 @@ pub fn verify_equivocation_proof(proof: &EquivocationProof) -> bool {
             Ok(m) => m,
             Err(_) => return false,
         };
-        secp.verify_ecdsa(&msg, &sig, &pubkey).is_ok()
+        secp.verify_schnorr(&sig, &msg, &xonly_pubkey).is_ok()
     };
 
     verify_single(&proof.first_attestation) && verify_single(&proof.second_attestation)
@@ -474,7 +498,7 @@ mod tests {
         let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
 
         // F1.3: Register the validator before adding attestation (fail-closed requires it)
-        mgr.register_validator(&hex::encode(pk.serialize()));
+        mgr.register_validator(&hex::encode(&pk.serialize()[1..]));
 
         let attestation = mgr
             .sign_state_root(&sk, "JKC", 100, "hash_abc", "state_root_123")
@@ -493,7 +517,7 @@ mod tests {
         let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
 
         // F1.3: Register the validator (fail-closed requires it)
-        mgr.register_validator(&hex::encode(pk.serialize()));
+        mgr.register_validator(&hex::encode(&pk.serialize()[1..]));
 
         // Sign first valid root
         let att1 = mgr
@@ -548,7 +572,7 @@ mod tests {
         let mut keys = Vec::new();
         for _ in 0..5 {
             let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-            mgr.register_validator(&hex::encode(pk.serialize()));
+            mgr.register_validator(&hex::encode(&pk.serialize()[1..]));
             keys.push((sk, pk));
         }
 
@@ -622,7 +646,7 @@ mod tests {
 
         for _ in 0..3 {
             let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-            mgr.register_validator(&hex::encode(pk.serialize()));
+            mgr.register_validator(&hex::encode(&pk.serialize()[1..]));
             let att = mgr.sign_state_root(&sk, "JKC", 200, "hash", "root").unwrap();
             mgr.add_attestation(att);
         }
@@ -642,10 +666,10 @@ mod tests {
 
         let (sk1, pk1) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
         let (sk2, pk2) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-        mgr1.register_validator(&hex::encode(pk1.serialize()));
-        mgr1.register_validator(&hex::encode(pk2.serialize()));
-        mgr2.register_validator(&hex::encode(pk1.serialize()));
-        mgr2.register_validator(&hex::encode(pk2.serialize()));
+        mgr1.register_validator(&hex::encode(&pk1.serialize()[1..]));
+        mgr1.register_validator(&hex::encode(&pk2.serialize()[1..]));
+        mgr2.register_validator(&hex::encode(&pk1.serialize()[1..]));
+        mgr2.register_validator(&hex::encode(&pk2.serialize()[1..]));
 
         // Both validators sign the same root in both managers
         let att1 = mgr1.sign_state_root(&sk1, "JKC", 300, "hash", "root_x").unwrap();

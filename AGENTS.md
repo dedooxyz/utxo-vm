@@ -163,7 +163,7 @@ L1 never runs WASM.
 Slash v1 = equivocation only (two signed attestations).  
 Invalid-transition slash = re-execute + operator vote or later fraud game. Not ZK until a real circuit exists.
 
-Do not claim JKC "has Taproot + OP_CAT activated" unless you cite a JKC Core merge + activation height in-repo. If uncertain, write "planned." Script builders must use Bitcoin script-num encoding. No 32-byte CHECKSIG keys. OP_CAT covenant code was deleted in Issue 14 — do not reintroduce OP_CAT into live bonding scripts. Tapscript leaves must use BIP-342 x-only pubkeys (32 bytes) and individual `OP_CHECKSIG` (not `OP_CHECKMULTISIG`, which is disabled in tapscript). Script-path spends must use `TapSighashType::All`, not `Default`.
+Do not claim JKC "has Taproot + OP_CAT activated" unless you cite a JKC Core merge + activation height in-repo. If uncertain, write "planned." Script builders must use Bitcoin script-num encoding. Tapscript leaves must use BIP-342 x-only pubkeys (32 bytes) and individual `OP_CHECKSIG` (not `OP_CHECKMULTISIG`, which is disabled in tapscript). Script-path spends must use `TapSighashType::All`, not `Default`. OP_CAT covenants ARE now part of the live bonding/challenge path — the operator (JKC dev) confirmed OP_CAT activation at h=1,155,000 is planned and the covenant-based anyone-can-slash model replaces the watcher committee. Attestation signatures use BIP-340 Schnorr (x-only pubkeys, 64-byte sigs) so the challenge leaf can verify equivocation on-chain via OP_CHECKSIG.
 
 Bonds: JKC locked in a documented vault template. No indexer token. Fees: optional extra output in the same user tx; Phase 1 fee may be 0.
 
@@ -198,7 +198,7 @@ Bonds: JKC locked in a documented vault template. No indexer token. Fees: option
 
 **Known violations (all fixed / deleted):**
 - `runtime.rs` — `host_verify_groth16` and the whole `zk.rs` module deleted; `experimental-zk` feature and `ark-*` deps removed (fixed by deletion).
-- `covenants.rs` — OP_CAT covenant code deleted entirely (Issue 14). `verify_equivocation_proof` moved to `attestation.rs`.
+- `covenants.rs` — OP_CAT covenant code re-enabled (policy reversal from Issue 14). `build_equivocation_covenant()` uses OP_CAT + OP_CHECKSIGVERIFY for committee-free equivocation slashing. Gated by `assert_chain_supports_bonding()` which checks disabled-opcode reactivation. Computation-fraud disputes still need the watcher committee (Item B).
 
 ## Docs policy
 

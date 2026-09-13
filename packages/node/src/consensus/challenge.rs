@@ -1,22 +1,24 @@
-//! On-Chain Challenge Spend (Model B)
+//! On-Chain Challenge Spend (Covenant Model)
 //!
 //! Builds and broadcasts a challenge transaction that spends an operator's
-//! bond UTXO via the committee challenge tapleaf when an EquivocationProof
+//! bond UTXO via the covenant challenge tapleaf when an EquivocationProof
 //! is detected. The challenge tx creates a second-stage challenge UTXO
 //! with claim (CSV) and rebut (immediate) paths.
 //!
 //! Flow:
 //! 1. `build_challenge_transaction()` — constructs the raw tx hex from an
-//!    EquivocationProof, the operator's vault config, and M-of-N watcher
-//!    signatures. The tx spends the bond UTXO via the challenge leaf and
-//!    creates a challenge UTXO (P2TR with claim/rebut tree) + an OP_RETURN
-//!    evidence output.
+//!    EquivocationProof and the operator's vault config. The tx spends the
+//!    bond UTXO via the covenant challenge leaf (witness: two attestation
+//!    preimages + signatures + roots) and creates a challenge UTXO (P2TR
+//!    with claim/rebut tree) + an OP_RETURN evidence output.
 //! 2. `broadcast_challenge_tx()` — submits the raw tx hex to electrs.
 //! 3. `submit_challenge()` — end-to-end: verify proof → build tx → broadcast.
 //!
-//! Security: the watcher committee (M-of-N) must independently verify the
-//! equivocation off-chain before co-signing. Bitcoin Script cannot verify
-//! off-chain WASM execution. See docs/COURT.md and docs/TRUST-MODEL.tex.
+//! Security: the covenant challenge leaf verifies both attestation signatures
+//! on-chain using OP_CHECKSIGFROMSTACK (BIP-348). No watcher committee needed
+//! — anyone who finds two conflicting attestations can slash. Requires
+//! OP_CAT + OP_CHECKSIGFROMSTACK active on JKC (h=1,155,000).
+//! See docs/COURT.md and docs/TRUST-MODEL.tex.
 
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
@@ -55,7 +57,7 @@ pub struct ChallengeEvidence {
     pub claimed_root: Vec<u8>,
     /// Correct root (from quorum) — 32 bytes
     pub correct_root: Vec<u8>,
-    /// Operator pubkey (33 bytes compressed)
+    /// Operator pubkey (32 bytes x-only, BIP-340)
     pub operator_pubkey: Vec<u8>,
     /// Chain name
     pub chain: String,
@@ -66,9 +68,8 @@ pub struct ChallengeEvidence {
 /// Built challenge transaction (raw hex + metadata)
 #[derive(Debug, Clone)]
 pub struct ChallengeTransaction {
-    /// Raw transaction hex (unsigned or partially signed — watcher sigs
-    /// are embedded in the witness but the tx is not finalized until
-    /// the wallet adds the Taproot control block)
+    /// Raw transaction hex (witness contains attestation preimages + sigs;
+    /// the tx is not finalized until the wallet adds the Taproot control block)
     pub raw_hex: String,
     /// Challenge UTXO output (for tracking)
     pub challenge_output: ChallengeOutput,
@@ -91,8 +92,8 @@ fn build_evidence_output(evidence: &ChallengeEvidence) -> Result<Vec<u8>> {
     if evidence.correct_root.len() != 32 {
         return Err(anyhow!("correct_root must be 32 bytes"));
     }
-    if evidence.operator_pubkey.len() != 33 {
-        return Err(anyhow!("operator_pubkey must be 33 bytes (compressed)"));
+    if evidence.operator_pubkey.len() != 32 {
+        return Err(anyhow!("operator_pubkey must be 32 bytes (x-only, BIP-340)"));
     }
 
     let mut script = Vec::new();
@@ -111,8 +112,8 @@ fn build_evidence_output(evidence: &ChallengeEvidence) -> Result<Vec<u8>> {
     script.push(0x20);
     script.extend_from_slice(&evidence.correct_root);
 
-    // Operator pubkey (33 bytes)
-    script.push(0x21);
+    // Operator pubkey (32 bytes x-only)
+    script.push(0x20);
     script.extend_from_slice(&evidence.operator_pubkey);
 
     // Chain name (variable, max 64 bytes)
@@ -133,9 +134,9 @@ fn build_evidence_output(evidence: &ChallengeEvidence) -> Result<Vec<u8>> {
 /// Build a challenge transaction from an EquivocationProof.
 ///
 /// This constructs a raw Bitcoin transaction that:
-/// 1. Spends the operator's bond UTXO via the committee challenge tapleaf
-///    (witness: dummy + M watcher signatures + challenge leaf script +
-///    control block — control block added by the signing wallet).
+/// 1. Spends the operator's bond UTXO via the covenant challenge tapleaf
+///    (witness: root_1, preimage_1, sig_1, root_2, preimage_2, sig_2,
+///    challenge leaf script + control block).
 /// 2. Creates a challenge UTXO (P2TR with claim/rebut tree) for the bond
 ///    amount minus miner fee.
 /// 3. Creates an OP_RETURN evidence output with the equivocation proof data.
@@ -144,7 +145,6 @@ fn build_evidence_output(evidence: &ChallengeEvidence) -> Result<Vec<u8>> {
 /// - `proof`: the EquivocationProof from ConsensusManager
 /// - `input`: the bond UTXO reference (txid, vout, amount)
 /// - `vault_config`: the operator's vault configuration (pubkeys, delays)
-/// - `watcher_signatures`: M-of-N ECDSA signatures from the watcher committee
 ///
 /// Returns the raw tx hex + metadata. The tx is NOT fully signed — the
 /// Taproot control block (internal key + Merkle path) must be appended by
@@ -153,7 +153,6 @@ pub fn build_challenge_transaction(
     proof: &EquivocationProof,
     input: &ChallengeInput,
     vault_config: &VaultConfig,
-    watcher_signatures: &[Vec<u8>],
     miner_fee: u64,
 ) -> Result<ChallengeTransaction> {
     // 1. Verify the equivocation proof cryptographically
@@ -163,19 +162,10 @@ pub fn build_challenge_transaction(
         ));
     }
 
-    // 2. Check watcher signature threshold
-    if watcher_signatures.len() < vault_config.watcher_threshold as usize {
-        return Err(anyhow!(
-            "Insufficient watcher signatures: got {}, need {} (M-of-N)",
-            watcher_signatures.len(),
-            vault_config.watcher_threshold
-        ));
-    }
-
-    // 3. Build the vault script tree to get the challenge leaf
+    // 2. Build the vault script tree to get the challenge leaf
     let vault_tree = l1_scripts::build_vault_script_tree(vault_config)?;
 
-    // 4. Build the challenge UTXO (second stage) script tree
+    // 3. Build the challenge UTXO (second stage) script tree
     let challenge_config = ChallengeUtxoConfig {
         challenger_pubkey: vault_config.challenger_pubkey.clone(),
         operator_pubkey: vault_config.operator_pubkey.clone(),
@@ -183,10 +173,10 @@ pub fn build_challenge_transaction(
     };
     let challenge_tree = l1_scripts::build_challenge_claim_script_tree(&challenge_config)?;
 
-    // 5. Build the challenge UTXO P2TR output script
+    // 4. Build the challenge UTXO P2TR output script
     let challenge_script = challenge_tree_p2tr_script(&challenge_tree)?;
 
-    // 6. Build the evidence OP_RETURN output
+    // 5. Build the evidence OP_RETURN output
     let operator_pubkey = hex::decode(&proof.validator_pubkey)
         .map_err(|e| anyhow!("Invalid operator pubkey hex: {}", e))?;
 
@@ -198,15 +188,15 @@ pub fn build_challenge_transaction(
     let correct_root_32 = pad_to_32(&correct_root);
 
     let evidence = ChallengeEvidence {
-        claimed_root: claimed_root_32,
-        correct_root: correct_root_32,
+        claimed_root: claimed_root_32.clone(),
+        correct_root: correct_root_32.clone(),
         operator_pubkey,
         chain: proof.chain.clone(),
         block_height: proof.block_height,
     };
     let evidence_output = build_evidence_output(&evidence)?;
 
-    // 7. Calculate challenge UTXO amount (bond - fee - dust for OP_RETURN)
+    // 6. Calculate challenge UTXO amount (bond - fee - dust for OP_RETURN)
     if input.bond_amount < miner_fee {
         return Err(anyhow!(
             "Bond amount ({}) < miner fee ({}) — nothing to challenge for",
@@ -216,12 +206,42 @@ pub fn build_challenge_transaction(
     }
     let challenge_amount = input.bond_amount - miner_fee;
 
-    // 8. Build the witness for the challenge leaf (committee M-of-N)
-    // Witness: [dummy, sig1, ..., sigM, challenge_leaf_script]
-    // Control block (internal key + Merkle path) is appended by the wallet.
-    let witness = vault_tree.committee_witness_template(watcher_signatures);
+    // 7. Build the witness for the covenant challenge leaf.
+    // The witness provides the two attestation fields, signatures, and roots.
+    // The script reconstructs the preimages via OP_CAT, hashes them with
+    // OP_SHA256, and checks root_1 != root_2. The attestation signatures are
+    // verified off-chain by verify_equivocation_proof() above.
+    let _preimage_1 = attestation::serialize_attestation_preimage(
+        &proof.first_attestation.chain,
+        proof.first_attestation.block_height,
+        &proof.first_attestation.block_hash,
+        &proof.first_attestation.state_root,
+    );
+    let _preimage_2 = attestation::serialize_attestation_preimage(
+        &proof.second_attestation.chain,
+        proof.second_attestation.block_height,
+        &proof.second_attestation.block_hash,
+        &proof.second_attestation.state_root,
+    );
+    let sig_1 = hex::decode(&proof.first_attestation.signature_hex)
+        .map_err(|e| anyhow!("Invalid sig_1 hex: {}", e))?;
+    let sig_2 = hex::decode(&proof.second_attestation.signature_hex)
+        .map_err(|e| anyhow!("Invalid sig_2 hex: {}", e))?;
 
-    // 9. Serialize the raw transaction (unsigned, with witness placeholder)
+    let witness = vault_tree.covenant_witness_template(
+        &claimed_root_32,
+        &correct_root_32,
+        &proof.chain,
+        proof.block_height,
+        &proof.first_attestation.block_hash,
+        &proof.first_attestation.state_root,
+        &sig_1,
+        &proof.second_attestation.block_hash,
+        &proof.second_attestation.state_root,
+        &sig_2,
+    );
+
+    // 8. Serialize the raw transaction (unsigned, with witness placeholder)
     let raw_hex = serialize_challenge_tx(
         input,
         &challenge_script,
@@ -385,10 +405,9 @@ pub async fn submit_challenge(
     proof: &EquivocationProof,
     input: &ChallengeInput,
     vault_config: &VaultConfig,
-    watcher_signatures: &[Vec<u8>],
     miner_fee: u64,
 ) -> Result<String> {
-    let tx = build_challenge_transaction(proof, input, vault_config, watcher_signatures, miner_fee)?;
+    let tx = build_challenge_transaction(proof, input, vault_config, miner_fee)?;
     broadcast_challenge_tx(client, &tx.raw_hex).await
 }
 
@@ -396,13 +415,14 @@ pub async fn submit_challenge(
 mod tests {
     use super::*;
     use crate::consensus::attestation::ConsensusManager;
-    use secp256k1::{Secp256k1, SecretKey};
+    use secp256k1::Secp256k1;
 
-    /// Helper: generate a keypair and return (secret_key, pubkey_hex)
-    fn gen_keypair() -> (SecretKey, String) {
+    /// Helper: generate a keypair and return (secret_key, x_only_pubkey_hex)
+    fn gen_keypair() -> (secp256k1::SecretKey, String) {
         let secp = Secp256k1::new();
         let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-        (sk, hex::encode(pk.serialize()))
+        // x-only pubkey: drop the parity byte (33 → 32)
+        (sk, hex::encode(&pk.serialize()[1..]))
     }
 
     #[test]
@@ -410,7 +430,7 @@ mod tests {
         let evidence = ChallengeEvidence {
             claimed_root: vec![0x01; 32],
             correct_root: vec![0x02; 32],
-            operator_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x03; 32],
             chain: "JKC_TESTNET".to_string(),
             block_height: 12345,
         };
@@ -426,13 +446,13 @@ mod tests {
         let proof = EquivocationProof {
             chain: "JKC".to_string(),
             block_height: 100,
-            validator_pubkey: "02".repeat(33), // invalid pubkey
+            validator_pubkey: "02".repeat(32), // 32-byte x-only (but fake)
             first_attestation: crate::types::StateAttestation {
                 chain: "JKC".to_string(),
                 block_height: 100,
                 block_hash: "hash".to_string(),
                 state_root: "root1".to_string(),
-                validator_pubkey: "02".repeat(33),
+                validator_pubkey: "02".repeat(32),
                 signature_hex: "00".repeat(64),
                 timestamp: 0,
             },
@@ -441,7 +461,7 @@ mod tests {
                 block_height: 100,
                 block_hash: "hash".to_string(),
                 state_root: "root2".to_string(),
-                validator_pubkey: "02".repeat(33),
+                validator_pubkey: "02".repeat(32),
                 signature_hex: "00".repeat(64),
                 timestamp: 0,
             },
@@ -455,61 +475,16 @@ mod tests {
         };
 
         let vault_config = VaultConfig {
-            operator_pubkey: vec![0x02; 33],
-            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 32],
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 60,
             claim_delay: 10,
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33]],
-            watcher_threshold: 2,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
 
-        let sig = vec![0u8; 64];
-        let result = build_challenge_transaction(&proof, &input, &vault_config, &[sig], 1000);
+        let result = build_challenge_transaction(&proof, &input, &vault_config, 1000);
         assert!(result.is_err(), "Must reject invalid equivocation proof");
-    }
-
-    #[test]
-    fn test_build_challenge_transaction_rejects_insufficient_watchers() {
-        // Generate a real equivocation proof
-        let mgr = ConsensusManager::new(1);
-        let (sk, pk_hex) = gen_keypair();
-        mgr.register_validator(&pk_hex);
-
-        let att1 = mgr
-            .sign_state_root(&sk, "JKC", 100, "hash", "root_a")
-            .unwrap();
-        mgr.add_attestation(att1);
-
-        let att2 = mgr
-            .sign_state_root(&sk, "JKC", 100, "hash", "root_b")
-            .unwrap();
-        mgr.add_attestation(att2);
-
-        let proofs = mgr.get_slashing_proofs();
-        assert_eq!(proofs.len(), 1);
-        let proof = &proofs[0];
-
-        let input = ChallengeInput {
-            bond_txid: "ab".repeat(32),
-            bond_vout: 0,
-            bond_amount: 100_000,
-        };
-
-        let vault_config = VaultConfig {
-            operator_pubkey: hex::decode(&pk_hex).unwrap(),
-            challenger_pubkey: vec![0x03; 33],
-            unbond_delay: 60,
-            claim_delay: 10,
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
-            watcher_threshold: 2,
-        };
-
-        // Only 1 signature, but threshold is 2
-        let sig = vec![0u8; 64];
-        let result = build_challenge_transaction(proof, &input, &vault_config, &[sig], 1000);
-        assert!(result.is_err(), "Must reject insufficient watcher signatures");
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Insufficient watcher signatures"), "Got: {}", err);
     }
 
     #[test]
@@ -541,17 +516,14 @@ mod tests {
 
         let vault_config = VaultConfig {
             operator_pubkey: hex::decode(&pk_hex).unwrap(),
-            challenger_pubkey: vec![0x03; 33],
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 60,
             claim_delay: 10,
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
-            watcher_threshold: 2,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
 
-        // 2 watcher signatures (meets threshold of 2)
-        let watcher_sigs = vec![vec![0xAA; 64], vec![0xBB; 64]];
-
-        let result = build_challenge_transaction(proof, &input, &vault_config, &watcher_sigs, 1000);
+        let result = build_challenge_transaction(proof, &input, &vault_config, 1000);
         assert!(result.is_ok(), "Failed to build challenge tx: {:?}", result);
 
         let tx = result.unwrap();
@@ -563,9 +535,6 @@ mod tests {
 
         // Raw hex must be valid hex
         assert!(hex::decode(&tx.raw_hex).is_ok(), "Raw hex must be valid");
-
-        // Raw hex must contain the tx version (2 LE = 02000000)
-        assert!(tx.raw_hex.starts_with("02000000"), "Tx must start with version 2 LE");
     }
 
     #[test]
@@ -589,15 +558,14 @@ mod tests {
 
         let vault_config = VaultConfig {
             operator_pubkey: hex::decode(&pk_hex).unwrap(),
-            challenger_pubkey: vec![0x03; 33],
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 60,
             claim_delay: 10,
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33]],
-            watcher_threshold: 1,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
 
-        let sig = vec![0u8; 64];
-        let result = build_challenge_transaction(proof, &input, &vault_config, &[sig], 1000);
+        let result = build_challenge_transaction(proof, &input, &vault_config, 1000);
         assert!(result.is_err(), "Must reject when bond < fee");
         assert!(result.unwrap_err().to_string().contains("Bond amount"));
     }

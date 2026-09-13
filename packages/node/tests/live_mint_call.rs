@@ -345,15 +345,14 @@ async fn live_equivocation_and_challenge_build() {
 
     let vault_config = l1_scripts::VaultConfig {
         operator_pubkey: hex::decode(&pk_hex).unwrap(),
-        challenger_pubkey: vec![0x03; 33],
+        challenger_pubkey: vec![0x03; 32],
         unbond_delay: 60,
         claim_delay: 10,
-        watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33]],
-        watcher_threshold: 1,
+        watcher_pubkeys: vec![],
+        watcher_threshold: 0,
     };
 
-    let watcher_sig = vec![0xAAu8; 64];
-    let tx = challenge::build_challenge_transaction(proof, &input, &vault_config, &[watcher_sig], 1000)
+    let tx = challenge::build_challenge_transaction(proof, &input, &vault_config, 1000)
         .expect("Failed to build challenge tx");
 
     println!("[LIVE] Challenge tx built (NOT broadcast — would slash real bond):");

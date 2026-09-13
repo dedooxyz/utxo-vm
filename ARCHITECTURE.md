@@ -67,7 +67,33 @@ UTXO-VM is a 100% original, clean-room, FOSS (MIT) implementation. Key distincti
 
 ---
 
-## 5. Privacy: MWEB & Stealth (FUTURE)
+## 6. Court: Bonding & Slashing
+
+UTXO-VM operators bond JKC in a P2TR vault and attest state roots. Two
+fraud classes are handled differently:
+
+- **Equivocation** (same operator, same chain/height, two different
+  state roots): enforced by an OP_CAT-based Taproot covenant
+  (`covenants::build_equivocation_covenant`). Any whistleblower who
+  finds two conflicting attestations can slash the bond without a
+  watcher committee. The covenant reconstructs attestation preimages
+  via OP_CAT, hashes them with OP_SHA256, and checks `root_1 != root_2`.
+  Attestation signatures are verified off-chain by
+  `verify_equivocation_proof()` before the challenge tx is built.
+
+- **Computation fraud** (operator signs one wrong-but-consistent root):
+  Script cannot re-execute WASM, so this still requires a watcher
+  committee (Item B) that independently re-executes the transition and
+  co-signs a challenge. The committee path is preserved in `l1_scripts.rs`
+  for this fraud class.
+
+Startup safety: `assert_chain_supports_bonding()` checks CSV, Taproot,
+and disabled-opcode reactivation (OP_CAT) before allowing bonding.
+Before reactivation, OP_CAT-containing tapleaves are OP_SUCCESS
+(anyone-can-spend), so bonding must not start until all three are active.
+
+See `docs/COURT.md` for script details and `docs/TRUST-MODEL.tex` for
+the trust model.
 
 > **Status:** MWEB is ACTIVE on JKC testnet (verified at block 183,374 — blocks contain HogEx transactions with OP_8 witness-v8 programs). Host functions (`host_stealth_settle`, `host_mweb_peg_out`) record settlement intent in the runtime; actual peg-out requires an MWEB-capable wallet to build MW kernels/rangeproofs — NOT on the v1 settlement path.
 

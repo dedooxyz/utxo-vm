@@ -144,7 +144,7 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 - JKC confirmed: Taproot, SegWit, full opcodes (OP\_CAT active on testnet), MWEB active on testnet (verified h=183,374)
 - Block time corrected: 1 minute (not 2.5 minutes)
 - P2TR vault scripts with Taproot script paths for challenge/exit
-- OP\_CAT active on testnet but NOT used in bonding scripts (covenants.rs deleted in Issue 14; hash comparison uses OP_EQUAL)
+- OP\_CAT covenant re-enabled for equivocation slashing (policy reversal from Issue 14; gated by JKC `DisabledScriptReactivationHeight`)
 - Interactive fraud proof (binary search) for v2 invalid root slash
 - Lazy operator detection and 50% bond slash
 - Operator rotation mechanism (1440 blocks ≈ 1 day)
@@ -167,7 +167,7 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 | Memory page cap enforced | **Done** | `Config::static_memory_maximum_size()` applied in `VmRuntime::new()` |
 | Two replays match | **Done** | `test_deterministic_replay_identical_root` — two independent `VmRuntime` instances, same fixture, identical state |
 | ZK stack removed | **Done** | `zk.rs`, `experimental-zk` feature, `ark-*` deps, and `host_verify_groth16` deleted — ZK has no v1 use case |
-| OP_CAT covenants deleted | **Done** | `covenants.rs` removed (Issue 14); `verify_equivocation_proof` moved to `attestation.rs` |
+| OP_CAT covenant re-enabled | **Done** | `covenants.rs` rebuilt with `build_equivocation_covenant()` using OP_CAT + OP_CHECKSIGVERIFY; equivocation slashing is now committee-free (policy reversal from Issue 14) |
 | Fuel exhaustion reverts | **Done** | `test_fuel_exhaustion_no_state_write` verifies state unchanged after fuel error |
 | Abort traps test | **Done** | `test_abort_traps` — WAT calling `env.abort` traps successfully |
 | Bad hash test | **Done** | `test_bad_wasm_hash_rejected` — mismatched code_hash rejected by runtime |
@@ -184,7 +184,7 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 | Seal spend | **Done** | `build_seal_spend_output()` in `l1_scripts.rs` |
 | Operator vault | **Done** | `build_vault_script_tree()` with P2TR script paths |
 | Batch commitment | **Done** | `build_batch_commitment_output()` with OP_RETURN |
-| Challenge leaf | **Done** | `build_challenge_leaf()` with OP_CHECKSIGADD (BIP-342, no OP_CAT) |
+| Challenge leaf | **Done** | `build_equivocation_covenant()` with OP_CAT + OP_CHECKSIGVERIFY (committee-free equivocation slashing); committee path preserved for computation-fraud disputes |
 | Silence escape | **Done** | `build_silence_escape_script()` with CSV |
 | Fee output | **Done** | `build_indexer_fee_output()` |
 

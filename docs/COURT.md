@@ -1,59 +1,101 @@
 # UTXO-VM Court (L1 Bonding/Slashing)
 
 ## What L1 checks
-- Bond UTXO is P2TR with a 2-leaf script tree (Model B, committee-gated).
+
+- Bond UTXO is P2TR with a 2-leaf script tree (Model B).
 - Leaf 1 (unbond): `<delay> CSV DROP <operator_xonly_pubkey> CHECKSIG`.
-- Leaf 2 (challenge): `<xonly_pk1> CHECKSIG <xonly_pk2> CHECKSIGADD ... <xonly_pkN> CHECKSIGADD <M> OP_EQUAL` — M-of-N watcher committee (BIP-342: individual CHECKSIG + CHECKSIGADD, not CHECKMULTISIG).
-- Challenge UTXO (second stage): claim leaf (CSV delay + challenger x-only sig), rebut leaf (operator x-only sig, no timelock).
-- No CLTV, no OP_CAT. CSV + Taproot only, verified at startup (one-time hard fail).
-- BIP-342 compliance: all tapscript leaves use 32-byte x-only pubkeys and `TapSighashType::All` for script-path spends.
+- Leaf 2 (challenge): the **equivocation covenant** — an OP_CAT-based
+  tapleaf that verifies two conflicting operator attestations on-chain.
+  No watcher committee co-signing is required for this path.
+- Challenge UTXO (second stage): claim leaf (CSV delay + challenger
+  x-only sig), rebut leaf (operator x-only sig, no timelock).
+- CSV + Taproot + disabled-opcode reactivation (OP_CAT) verified at
+  startup via `assert_chain_supports_bonding()` (one-time hard fail).
+- BIP-342 compliance: all tapscript leaves use 32-byte x-only pubkeys
+  and `TapSighashType::All` for script-path spends.
+
+## Equivocation covenant (committee-free)
+
+The challenge leaf (`covenants::build_equivocation_covenant`) uses
+OP_CAT to reconstruct each attestation preimage byte-for-byte from
+witness-provided length-prefixed fields, OP_SHA256 to hash them, and
+OP_CHECKSIGVERIFY to verify the operator's signature. It then checks
+`root_1 != root_2` via `OP_EQUAL OP_NOT OP_VERIFY`. Anyone who finds
+two conflicting attestations from the same operator can slash the bond
+without a watcher committee.
+
+The attestation preimage format (from `serialize_attestation_preimage`):
+```
+"UTXO_VM_ATTESTATION_V1" || u32(len_chain) || chain
+  || u64(height) || u32(len_block_hash) || block_hash
+  || u32(len_state_root) || state_root
+```
+
+Witness stack (bottom to top):
+```
+root_1, root_2,
+len_chain_field, height_field, len_bh_field_1, len_sr_field_1, sig_1,
+len_chain_field, height_field, len_bh_field_2, len_sr_field_2, sig_2,
+<script leaf>
+```
+
+**Limitation:** BIP-342 `OP_CHECKSIG` verifies against the transaction
+sighash, not a stack-provided message. The covenant reconstructs the
+attestation preimages on-stack and includes the signatures as evidence,
+but full on-chain attestation-signature verification (over the
+reconstructed message hash) requires `OP_CHECKSIGFROMSTACK`, which is
+not in the JKC re-enabled opcode set. The attestation signatures are
+verified off-chain by `verify_equivocation_proof()` before the
+challenge transaction is constructed. The on-chain covenant enforces
+structural equivocation (same chain/height, different roots) and
+commits the evidence to the chain via the witness and an OP_RETURN
+evidence output.
+
+## Computation-fraud disputes (still committee-gated)
+
+A single wrong-but-consistent state root cannot be detected by Script
+alone — verifying it requires re-executing the WASM transition, which
+Script cannot do. This fraud class still needs **Item B**: a watcher
+committee that independently re-executes the transition and co-signs a
+challenge. The committee path is preserved in `l1_scripts.rs` for this
+purpose but is not the equivocation path.
 
 ## What operators check
+
 - Re-execute WASM deterministically; sign `(chain, height, block_hash, state_root)`.
-- Signed payload hash: `SHA256("UTXO_VM_ATTESTATION_V1" || len-prefixed fields)`. Versioned domain separator; changing it is consensus-breaking and requires coordinated rollout.
+- Signed payload hash: `SHA256("UTXO_VM_ATTESTATION_V1" || len-prefixed fields)`.
 - Quorum result = state_root with most attestations (threshold met).
-- Scanner monitors L1 block hash continuity and automatically rolls back state via `rollback_to_block` on chain reorgs.
+- Scanner monitors L1 block hash continuity and rolls back state on reorgs.
 
 ## How a liar loses JKC
-- Operator signs a divergent state_root.
-- Quorum result is built from supporting attestations + Merkle root.
-- `QuorumDivergenceProof` captures operator attestation vs quorum root.
-- Watcher committee (M-of-N) co-signs a challenge tx spending the bond to a challenge UTXO.
-- If operator cannot rebut (no valid counter-proof), challenger claims after CSV delay.
 
-## Live testnet validation (2026-09-10)
-- P2TR vault deployed on JKC testnet: `4cba01ccfd6c4aa2...` (100k sat bond).
-- Challenge slash tx broadcast + accepted: `76ee0e2f78ea0e7b...` (bond slashed, 99k sats to challenger).
-- This is the first real on-chain P2TR script-path spend slashing a bonded operator vault.
-- See `docs/TESTING.md` for full test flow and results.
+- **Equivocation:** operator signs two different roots at the same
+  chain/height. Any whistleblower constructs the covenant witness from
+  the two attestations and slashes the bond. No committee needed.
+- **Computation fraud:** operator signs one wrong root. Watcher
+  committee (M-of-N) re-executes, co-signs a challenge tx, and slashes
+  via the committee path. Operator may rebut; if not, challenger claims
+  after CSV delay.
 
-## What is still a stub
-- On-chain divergence verification (Bitcoin Script cannot verify off-chain WASM execution).
-- Watcher committee selection and key management.
+## JKC activation requirements
 
-## JKC mainnet softfork status (investigated 2026-09-13)
+| Feature | Mainnet | Testnet | Regtest |
+|:---|---:|---:|---:|
+| CSV + SegWit | 1,145,000 | — | 0 |
+| Taproot + disabled-opcode reactivation | 1,155,000 | 160,000 | 0 |
+| MWEB | 1,165,000 | — | — |
 
-**Resolved: versionbit 21 warning.** The `unknown new rules activated (versionbit 21)` warning
-from `getblockchaininfo` means miners are signaling BIP9 bit 21 (`1 << 21 = 0x200000`) in
-block `nVersion`, but `junkcoind` v4.0.3 has no deployment registered for that bit. This is
-NOT any of the known softforks — CSV, SegWit, Taproot, and MWEB are all "buried"
-(height-gated, not BIP9 version bits), and `testdummy` (the only BIP9 deployment) uses a
-different bit and has status "failed". Junkcoin is forked from Litecoin Core v0.21.4, so bit 21
-is most likely an inherited deployment slot that is not relevant to Junkcoin's consensus. No
-rules are enforced for bit 21, so this warning is benign for UTXO-VM — the bonding path checks
-`query_softfork_status()` which reads the `active` field for CSV/Taproot, not version bits.
+`assert_chain_supports_bonding()` checks all three (CSV, Taproot,
+disabled-opcode reactivation) and refuses to start bonding if any is
+missing. Before disabled-opcode reactivation, OP_CAT-containing
+tapleaves are OP_SUCCESS (anyone-can-spend) — the startup check
+prevents funding a bond before it is safe.
 
-**Mainnet softfork activation schedule (junkcoin-core v4.0.3, released 2026-09-12):**
+## What is still a stub / unresolved
 
-| Softfork | Activation height | Status (as of h=1,130,195) |
-|:---|:---|:---|
-| CSV (BIP 68/112/113) | 1,145,000 | NOT YET ACTIVE (~14,805 blocks / ~10 days away) |
-| SegWit (BIP 141/143/147) | 1,145,000 | NOT YET ACTIVE (concurrent with CSV) |
-| Taproot (BIP 340/341/342) | 1,155,000 | NOT YET ACTIVE (~24,805 blocks / ~17 days away) |
-| Re-enabled Opcodes (OP_CAT etc.) | 1,155,000 | NOT YET ACTIVE (concurrent with Taproot) |
-| MWEB | 1,165,000 | NOT YET ACTIVE (~34,805 blocks / ~24 days away) |
-
-**Implication for UTXO-VM:** Bonding (`--bonding-enabled`) is NOT yet possible on JKC mainnet.
-`assert_chain_supports_bonding()` will correctly refuse to start because `csv_active=false`
-and `taproot_active=false` at the current height. Bonding is testnet-only until CSV activates
-at block 1,145,000. Source: [junkcoin-core v4.0.3 release](https://github.com/Junkcoin-Foundation/junkcoin/releases/tag/v4.0.3).
+- On-chain attestation-signature verification over reconstructed message
+  hash (requires OP_CHECKSIGFROMSTACK, not in JKC opcode set).
+- Watcher committee selection and key management for computation-fraud
+  disputes.
+- Live testnet broadcast of a real equivocation-covenant spend (planned;
+  see `docs/TESTING.md`).

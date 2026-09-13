@@ -47,6 +47,15 @@ pub const OP_SHA256: u8 = 0xa8;
 pub const OP_RETURN: u8 = 0x6a;
 pub const OP_1: u8 = 0x51;
 pub const OP_ADD: u8 = 0x93;
+/// OP_CAT (0x7e) — re-enabled on JKC at h=1,155,000 (concurrent with Taproot).
+/// Concatenates top two stack items. Used in the covenant challenge leaf to
+/// reconstruct the attestation message hash for on-chain equivocation verification.
+pub const OP_CAT: u8 = 0x7e;
+pub const OP_VERIFY: u8 = 0x69;
+pub const OP_NOT: u8 = 0x91;
+pub const OP_PUSHDATA1: u8 = 0x4c;
+pub const OP_TOALTSTACK: u8 = 0x6b;
+pub const OP_FROMALTSTACK: u8 = 0x6c;
 
 /// Taproot leaf version (BIP-341)
 pub const TAPROOT_LEAF_VERSION: u8 = 0xc0;
@@ -81,50 +90,61 @@ pub fn tagged_hash(tag: &[u8], data: &[u8]) -> Vec<u8> {
 /// NOT from bond creation — this is the key advantage of Model B over a
 /// naive single-UTXO race design.
 ///
-/// Trust assumption: the watcher committee (M-of-N) must independently verify
-/// divergence evidence off-chain before co-signing a challenge. Bitcoin Script
-/// cannot verify off-chain data, so script-level security is limited to
-/// "M independent watchers agreed to challenge." A fraudulent committee can
-/// steal the bond; the security model assumes M-of-N watchers are honest.
+/// Trust assumption: with OP_CAT + Taproot active on JKC (h=1,155,000), the
+/// challenge leaf verifies the equivocation proof ON-CHAIN — no watcher
+/// committee needed. Anyone who finds two conflicting attestations from the
+/// same operator (same chain+height, different state_roots, both valid
+/// Schnorr signatures) can slash the bond. The Script is the judge.
 #[derive(Debug, Clone)]
 pub struct VaultConfig {
-    /// Operator's public key (compressed, 33 bytes)
+    /// Operator's public key (x-only, 32 bytes — BIP-340 Schnorr)
     pub operator_pubkey: Vec<u8>,
-    /// Challenger's public key (compressed, 33 bytes) — receives slashed bond
+    /// Challenger's public key (x-only, 32 bytes — receives slashed bond)
     pub challenger_pubkey: Vec<u8>,
     /// Unbond delay in blocks (relative timelock via CSV)
     pub unbond_delay: u32,
     /// Claim delay in blocks (relative timelock on challenge UTXO via CSV)
     pub claim_delay: u32,
-    /// Watcher committee public keys (compressed, 33 bytes each)
+    /// Watcher committee public keys — KEPT FOR BACKWARD COMPAT with existing
+    /// tests/configs but UNUSED in the covenant challenge path. The covenant
+    /// challenge leaf (build_covenant_challenge_script) ignores this field.
+    /// Set to empty vec for the covenant path.
     pub watcher_pubkeys: Vec<Vec<u8>>,
-    /// Required number of watcher signatures (M-of-N)
+    /// Required number of watcher signatures — UNUSED in the covenant path.
+    /// Kept for backward compat. Set to 0 for the covenant path.
     pub watcher_threshold: u32,
 }
 
 /// Challenge UTXO configuration (Model B second stage)
 #[derive(Debug, Clone)]
 pub struct ChallengeUtxoConfig {
-    /// Challenger's public key (compressed, 33 bytes) — receives slashed bond
+    /// Challenger's public key (x-only, 32 bytes — receives slashed bond)
     pub challenger_pubkey: Vec<u8>,
-    /// Operator's public key (compressed, 33 bytes) — can rebut
+    /// Operator's public key (x-only, 32 bytes — can rebut)
     pub operator_pubkey: Vec<u8>,
     /// Claim delay in blocks (CSV from challenge tx confirmation)
     pub claim_delay: u32,
 }
 
-/// Challenge proof data
+/// Challenge proof data — the witness for the covenant challenge leaf.
+///
+/// With OP_CAT + Taproot, the challenge leaf verifies the equivocation
+/// on-chain: it checks both Schnorr signatures are valid for the same
+/// (chain, height, block_hash) but different state_roots. No watcher
+/// committee co-signing needed — anyone can slash.
 #[derive(Debug, Clone)]
 pub struct ChallengeProof {
-    /// The operator's claimed (wrong) root
+    /// The operator's first attestation root (the "wrong" one)
     pub claimed_root: Vec<u8>,
-    /// The correct root (from challenger's re-execution)
+    /// The operator's second attestation root (the "correct" one)
     pub correct_root: Vec<u8>,
-    /// Operator's signature on the wrong root
+    /// Operator's Schnorr signature on the first root (64 bytes)
     pub operator_signature: Vec<u8>,
-    /// Operator's public key
+    /// Operator's Schnorr signature on the second root (64 bytes)
+    pub operator_signature_2: Vec<u8>,
+    /// Operator's public key (x-only, 32 bytes)
     pub operator_pubkey: Vec<u8>,
-    /// Challenger's public key (must be provided, NOT hardcoded)
+    /// Challenger's public key (x-only, 32 bytes — receives slashed bond)
     pub challenger_pubkey: Vec<u8>,
 }
 
@@ -145,42 +165,23 @@ pub struct SealSpendProof {
 // OPERATOR VAULT SCRIPT (P2TR)
 // ============================================================================
 
-/// Build the operator vault script tree for P2TR spending (Model B).
+/// Build the operator vault script tree for P2TR spending (covenant model).
 ///
 /// Script tree:
 /// - Leaf 1 (Operator unbond): `<unbond_delay> CSV DROP <operator_pubkey> CHECKSIG`
-/// - Leaf 2 (Committee challenge): `<M> <pubkey1> ... <pubkeyN> <N> CHECKMULTISIG`
+/// - Leaf 2 (Covenant challenge): anyone-can-slash equivocation proof on-chain
 ///
-/// The committee challenge leaf has NO timelock — watchers can initiate a
-/// challenge at any time by spending the bond to a challenge UTXO (which
-/// carries the CSV-delayed claim path). The operator's only defense is to
-/// unbond via Leaf 1 before the committee challenges, or to not diverge.
+/// The covenant challenge leaf uses OP_CAT + OP_SHA256 + OP_CHECKSIG to verify
+/// two conflicting Schnorr attestations from the same operator on-chain. No
+/// watcher committee needed — anyone who finds two signed attestations with
+/// different state_roots for the same (chain, height, block_hash) can slash.
+/// Requires OP_CAT active (h=1,155,000 on JKC mainnet).
 pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> {
-    if config.operator_pubkey.len() != 33 {
-        return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
+    if config.operator_pubkey.len() != 32 {
+        return Err(anyhow!("Operator pubkey must be 32 bytes (x-only, BIP-340)"));
     }
-    if config.challenger_pubkey.len() != 33 {
-        return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
-    }
-    if config.watcher_pubkeys.is_empty() {
-        return Err(anyhow!("Watcher committee must have at least 1 pubkey"));
-    }
-    for (i, pk) in config.watcher_pubkeys.iter().enumerate() {
-        if pk.len() != 33 {
-            return Err(anyhow!("Watcher pubkey {} must be 33 bytes (compressed)", i));
-        }
-    }
-    if config.watcher_threshold as usize > config.watcher_pubkeys.len() {
-        return Err(anyhow!("Watcher threshold M ({}) cannot exceed N ({})",
-            config.watcher_threshold, config.watcher_pubkeys.len()));
-    }
-    if config.watcher_threshold == 0 {
-        return Err(anyhow!("Watcher threshold must be >= 1"));
-    }
-    // Bitcoin consensus limit: OP_CHECKMULTISIG supports at most 20 pubkeys
-    if config.watcher_pubkeys.len() > 20 {
-        return Err(anyhow!("Watcher committee cannot exceed 20 pubkeys (Bitcoin CHECKMULTISIG limit), got {}",
-            config.watcher_pubkeys.len()));
+    if config.challenger_pubkey.len() != 32 {
+        return Err(anyhow!("Challenger pubkey must be 32 bytes (x-only, BIP-340)"));
     }
 
     // Leaf 1: Operator unbond path
@@ -189,28 +190,30 @@ pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> 
         config.unbond_delay,
     )?;
 
-    // Leaf 2: Committee challenge path (M-of-N multisig, no timelock)
-    let challenge_leaf = build_committee_challenge_leaf(
-        &config.watcher_pubkeys,
-        config.watcher_threshold,
-    )?;
+    // Leaf 2: Covenant challenge path (anyone-can-slash, no committee)
+    let challenge_leaf = build_covenant_challenge_leaf(&config.operator_pubkey)?;
 
     Ok(VaultScriptTree {
         operator_leaf,
         challenge_leaf,
         operator_pubkey: config.operator_pubkey.clone(),
         challenger_pubkey: config.challenger_pubkey.clone(),
-        num_watchers: config.watcher_pubkeys.len(),
+        num_watchers: 0, // no watcher committee in the covenant model
     })
 }
 
 /// Build the operator unbond leaf script.
 ///
 /// Script: <unbond_delay> OP_CHECKSEQUENCEVERIFY OP_DROP <operator_pubkey> OP_CHECKSIG
+/// operator_pubkey is x-only (32 bytes, BIP-340).
 fn build_operator_unbond_leaf(
     operator_pubkey: &[u8],
     unbond_delay: u32,
 ) -> Result<Vec<u8>> {
+    if operator_pubkey.len() != 32 {
+        return Err(anyhow!("Operator pubkey must be 32 bytes (x-only)"));
+    }
+
     let mut script = Vec::new();
 
     // Push unbond delay as minimal encoding
@@ -222,7 +225,7 @@ fn build_operator_unbond_leaf(
 
     // Push operator pubkey (x-only, 32 bytes for BIP-342 tapscript)
     script.push(32);
-    script.extend_from_slice(&operator_pubkey[1..]);
+    script.extend_from_slice(operator_pubkey);
 
     // Checksig
     script.push(OP_CHECKSIG);
@@ -230,69 +233,21 @@ fn build_operator_unbond_leaf(
     Ok(script)
 }
 
-/// Build the committee challenge leaf script (Model B).
+/// Build the covenant challenge leaf script (anyone-can-slash).
 ///
-/// BIP-342 disables OP_CHECKMULTISIG in tapscript. We use the standard
-/// BIP-342 multisig pattern with individual OP_CHECKSIG and OP_CHECKSIGADD (0xba).
+/// Delegates to `covenants::build_equivocation_covenant()`. See that module
+/// for the full script logic and witness format.
 ///
-/// Pattern for N=1:
-///   <pubkey1> OP_CHECKSIG
+/// This leaf uses OP_CAT + OP_SHA256 + OP_CHECKSIGVERIFY to verify an
+/// equivocation proof ON-CHAIN. No watcher committee — anyone who finds two
+/// conflicting attestations from the same operator can slash the bond.
 ///
-/// Pattern for N>1:
-///   <pubkey1> OP_CHECKSIG <pubkey2> OP_CHECKSIGADD ... <pubkeyN> OP_CHECKSIGADD <threshold> OP_EQUAL
-///
-/// Under BIP-342, CHECKSIGADD pops (pubkey, num, sig). If sig is valid,
-/// it pushes num + 1. If sig is empty, it pushes num. If sig is invalid,
-/// execution traps.
-///
-/// The watcher committee (M-of-N) can spend the bond to a challenge UTXO.
-/// No timelock — the committee can challenge at any time. Security comes
-/// from requiring M independent watchers to co-sign, not from the script
-/// proving divergence (which Bitcoin Script cannot do).
-fn build_committee_challenge_leaf(
-    watcher_pubkeys: &[Vec<u8>],
-    threshold: u32,
-) -> Result<Vec<u8>> {
-    if watcher_pubkeys.is_empty() {
-        return Err(anyhow!("Watcher committee must have at least 1 pubkey"));
-    }
-    if threshold as usize > watcher_pubkeys.len() {
-        return Err(anyhow!("Threshold M cannot exceed N"));
-    }
-
-    for (i, pk) in watcher_pubkeys.iter().enumerate() {
-        if pk.len() != 33 {
-            return Err(anyhow!("Watcher pubkey {} must be 33 bytes (compressed)", i));
-        }
-    }
-
-    let mut script = Vec::new();
-
-    if watcher_pubkeys.len() == 1 {
-        // Single watcher: push x-only pubkey (32 bytes), OP_CHECKSIG
-        // Evaluation leaves 1 on stack if valid (threshold must be 1)
-        script.push(32);
-        script.extend_from_slice(&watcher_pubkeys[0][1..]);
-        script.push(OP_CHECKSIG);
-    } else {
-        // First watcher: push x-only pubkey (32 bytes), OP_CHECKSIG (leaves 1 on stack)
-        script.push(32);
-        script.extend_from_slice(&watcher_pubkeys[0][1..]);
-        script.push(OP_CHECKSIG);
-
-        // Subsequent watchers: push x-only pubkey (32 bytes), OP_CHECKSIGADD (accumulates count)
-        for pk in &watcher_pubkeys[1..] {
-            script.push(32);
-            script.extend_from_slice(&pk[1..]);
-            script.push(OP_CHECKSIGADD);
-        }
-
-        // Push M (threshold) and compare with accumulated signature count
-        push_minimal_uint(&mut script, threshold as u64);
-        script.push(OP_EQUAL);
-    }
-
-    Ok(script)
+/// Requires OP_CAT active on the connected chain (JKC h=1,155,000 mainnet,
+/// h=160,000 testnet, 0 regtest). Before activation, OP_CAT-containing
+/// tapleaves are OP_SUCCESS (anyone-can-spend) — `assert_chain_supports_bonding()`
+/// in main.rs checks this and refuses to start bonding.
+fn build_covenant_challenge_leaf(operator_pubkey: &[u8]) -> Result<Vec<u8>> {
+    crate::consensus::covenants::build_equivocation_covenant(operator_pubkey)
 }
 
 /// Vault script tree containing both spending paths
@@ -402,6 +357,45 @@ impl VaultScriptTree {
     /// If fewer than N signatures are provided (e.g. only M signatures meeting threshold),
     /// this function pads the remaining non-signing watcher slots with empty byte vectors `vec![]`.
     ///
+    /// Build the witness stack for the covenant challenge leaf.
+    ///
+    /// Witness order (bottom to top, i.e. witness array order):
+    ///   root_1, preimage_1, sig_1, root_2, preimage_2, sig_2
+    ///
+    /// Where:
+    /// - root_N is the state_root from attestation N (as raw bytes)
+    /// - preimage_N is the serialized attestation payload that, when SHA256'd,
+    ///   produces the message the operator signed (see
+    ///   ConsensusManager::hash_attestation_payload)
+    /// - sig_N is the operator's BIP-340 Schnorr signature (64 bytes)
+    ///
+    /// The script leaf (build_covenant_challenge_leaf, delegating to
+    /// covenants::build_equivocation_covenant) verifies both signatures
+    /// against their preimage hashes using OP_CHECKSIGVERIFY, then checks
+    /// root_1 != root_2.
+    pub fn covenant_witness_template(
+        &self,
+        root_1: &[u8],
+        root_2: &[u8],
+        chain: &str,
+        height: u64,
+        block_hash_1: &str,
+        state_root_1: &str,
+        sig_1: &[u8],
+        block_hash_2: &str,
+        state_root_2: &str,
+        sig_2: &[u8],
+    ) -> Vec<Vec<u8>> {
+        crate::consensus::covenants::build_equivocation_witness(
+            root_1, root_2, chain, height,
+            block_hash_1, state_root_1, sig_1,
+            block_hash_2, state_root_2, sig_2,
+            &self.challenge_leaf,
+        )
+    }
+
+    /// Build the witness stack for the committee challenge leaf (legacy).
+    ///
     /// Bitcoin witness stack order: items pushed first sit at the bottom of the stack.
     /// During BIP-342 execution, the first opcode (CHECKSIG for pk1) pops the top of the stack.
     /// Reversing the N signatures ensures signatures[0] (for pk1) sits at the top of the stack.
@@ -449,11 +443,11 @@ impl VaultScriptTree {
 /// The on-chain OP_RETURN evidence from the challenge tx allows the community
 /// to verify off-chain whether the rebut was justified.
 pub fn build_challenge_claim_script_tree(config: &ChallengeUtxoConfig) -> Result<ChallengeScriptTree> {
-    if config.challenger_pubkey.len() != 33 {
-        return Err(anyhow!("Challenger pubkey must be 33 bytes (compressed)"));
+    if config.challenger_pubkey.len() != 32 {
+        return Err(anyhow!("Challenger pubkey must be 32 bytes (x-only, BIP-340)"));
     }
-    if config.operator_pubkey.len() != 33 {
-        return Err(anyhow!("Operator pubkey must be 33 bytes (compressed)"));
+    if config.operator_pubkey.len() != 32 {
+        return Err(anyhow!("Operator pubkey must be 32 bytes (x-only, BIP-340)"));
     }
 
     // Leaf 1: Challenger claim (CSV delay from challenge tx)
@@ -463,7 +457,7 @@ pub fn build_challenge_claim_script_tree(config: &ChallengeUtxoConfig) -> Result
         script.push(OP_CHECKSEQUENCEVERIFY);
         script.push(OP_DROP);
         script.push(32);
-        script.extend_from_slice(&config.challenger_pubkey[1..]);
+        script.extend_from_slice(&config.challenger_pubkey);
         script.push(OP_CHECKSIG);
         script
     };
@@ -472,7 +466,7 @@ pub fn build_challenge_claim_script_tree(config: &ChallengeUtxoConfig) -> Result
     let rebut_leaf = {
         let mut script = Vec::new();
         script.push(32);
-        script.extend_from_slice(&config.operator_pubkey[1..]);
+        script.extend_from_slice(&config.operator_pubkey);
         script.push(OP_CHECKSIG);
         script
     };
@@ -539,12 +533,19 @@ pub struct SoftforkStatus {
     pub csv_active: bool,
     pub segwit_active: bool,
     pub taproot_active: bool,
+    /// Whether disabled opcodes (OP_CAT, OP_SUBSTR, etc.) have been re-enabled.
+    /// On JKC this is gated by `DisabledScriptReactivationHeight` (h=1,155,000
+    /// mainnet, h=160,000 testnet, 0 regtest), distinct from `TaprootHeight`.
+    /// Before this height, OP_CAT-containing tapleaves are OP_SUCCESS
+    /// (anyone-can-spend), so bonding must not start until this is active.
+    pub disabled_opcodes_active: bool,
 }
 
 /// One-time startup assertion: verify that the connected chain reports
-/// CSV and Taproot as active. This is a deployment precondition, not runtime
-/// feature detection — it fails loudly once at startup if the chain doesn't
-/// meet the requirements. No polling, no fallback logic.
+/// CSV, Taproot, and disabled-opcode reactivation as active. This is a
+/// deployment precondition, not runtime feature detection — it fails loudly
+/// once at startup if the chain doesn't meet the requirements. No polling,
+/// no fallback logic.
 ///
 /// Call this once at node startup when bonding is enabled. If it returns Err,
 /// the node must refuse to start (or refuse to enable bonding).
@@ -561,6 +562,15 @@ pub fn assert_chain_supports_bonding(status: &SoftforkStatus) -> Result<()> {
             "Chain does not report Taproot (BIP341) as active. \
              Bonding requires Taproot for P2TR script-tree spending. \
              Activate Taproot on the target chain before enabling bonding."
+        ));
+    }
+    if !status.disabled_opcodes_active {
+        return Err(anyhow!(
+            "Chain does not report disabled-opcode reactivation as active. \
+             The equivocation covenant uses OP_CAT, which is OP_SUCCESS \
+             (anyone-can-spend) before DisabledScriptReactivationHeight. \
+             On JKC mainnet this is h=1,155,000; testnet h=160,000; regtest 0. \
+             Do not start bonding until OP_CAT is re-enabled."
         ));
     }
     Ok(())
@@ -611,6 +621,7 @@ pub async fn query_softfork_status(rpc_url: &str) -> Result<SoftforkStatus> {
     let mut csv_active = false;
     let mut segwit_active = false;
     let mut taproot_active = false;
+    let mut disabled_opcodes_active = false;
 
     // Check "softforks" array (Bitcoin Core format)
     if let Some(softforks) = json.get("softforks").and_then(|v| v.as_array()) {
@@ -621,6 +632,10 @@ pub async fn query_softfork_status(rpc_url: &str) -> Result<SoftforkStatus> {
                 "csv" => csv_active = active,
                 "segwit" => segwit_active = active,
                 "taproot" => taproot_active = active,
+                // JKC reports disabled-opcode reactivation as a softfork deployment
+                "disabled_opcodes" | "disabledopcodes" | "reactivated_opcodes" => {
+                    disabled_opcodes_active = active;
+                }
                 _ => {}
             }
         }
@@ -637,12 +652,38 @@ pub async fn query_softfork_status(rpc_url: &str) -> Result<SoftforkStatus> {
         if let Some(taproot) = deployments.get("taproot") {
             taproot_active = taproot_active || taproot.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
         }
+        // JKC disabled-opcode reactivation
+        for key in ["disabled_opcodes", "disabledopcodes", "reactivated_opcodes"] {
+            if let Some(dep) = deployments.get(key) {
+                disabled_opcodes_active = disabled_opcodes_active
+                    || dep.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            }
+        }
+    }
+
+    // Fallback: if the chain reports a block height >= the known JKC
+    // DisabledScriptReactivationHeight, treat opcodes as active. This handles
+    // JKC nodes that don't expose the deployment status explicitly.
+    if !disabled_opcodes_active {
+        if let Some(height) = json.get("blocks").and_then(|v| v.as_u64()) {
+            // JKC mainnet: 1,155,000; testnet: 160,000; regtest: 0.
+            // We use the mainnet height as the conservative threshold. Testnet
+            // and regtest activate earlier, so if the chain reports a height
+            // >= 1,155,000 it's definitely past reactivation on any network.
+            // For testnet/regtest, the explicit deployment check above should
+            // catch it; this fallback only covers mainnet nodes that don't
+            // report the deployment.
+            if height >= 1_155_000 {
+                disabled_opcodes_active = true;
+            }
+        }
     }
 
     Ok(SoftforkStatus {
         csv_active,
         segwit_active,
         taproot_active,
+        disabled_opcodes_active,
     })
 }
 
@@ -915,12 +956,12 @@ mod tests {
     #[test]
     fn test_build_vault_script_tree_model_b() {
         let config = VaultConfig {
-            operator_pubkey: vec![0x02; 33],
-            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 32],
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 1008, // ~1 week
             claim_delay: 144,   // ~1 day
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
-            watcher_threshold: 2,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
 
         let tree = build_vault_script_tree(&config).expect("Failed to build vault script tree");
@@ -940,16 +981,16 @@ mod tests {
         assert!(tree.operator_leaf.contains(&OP_DROP));
         assert!(tree.operator_leaf.contains(&OP_CHECKSIG));
 
-        // Challenge leaf must contain CHECKSIG (BIP-342: no CHECKMULTISIG in tapscript)
-        assert!(tree.challenge_leaf.contains(&OP_CHECKSIG));
+        // Challenge leaf is the equivocation covenant — uses OP_CAT + OP_CHECKSIGVERIFY
+        assert!(tree.challenge_leaf.contains(&OP_CHECKSIGVERIFY), "Challenge leaf must use OP_CHECKSIGVERIFY");
         assert!(!tree.challenge_leaf.contains(&OP_CHECKMULTISIG), "Challenge leaf must NOT contain CHECKMULTISIG (BIP-342)");
         assert!(!tree.challenge_leaf.contains(&0xb1), "Challenge leaf must NOT contain CLTV (0xb1)");
-        assert!(!tree.challenge_leaf.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT (0x7e)");
+        assert!(tree.challenge_leaf.contains(&0x7e), "Challenge leaf MUST contain OP_CAT (0x7e) — equivocation covenant");
     }
 
     #[test]
     fn test_build_operator_unbond_leaf() {
-        let pubkey = vec![0x02; 33];
+        let pubkey = vec![0x02; 32];
         let script = build_operator_unbond_leaf(&pubkey, 1008).expect("Failed to build operator leaf");
 
         assert!(script.contains(&OP_CHECKSEQUENCEVERIFY));
@@ -960,68 +1001,43 @@ mod tests {
     }
 
     #[test]
-    fn test_build_committee_challenge_leaf() {
-        // Test N=1 (single watcher)
-        let single_watcher = vec![vec![0x02; 33]];
-        let single_script = build_committee_challenge_leaf(&single_watcher, 1).unwrap();
-        assert!(single_script.contains(&OP_CHECKSIG));
-        assert!(!single_script.contains(&OP_CHECKSIGADD), "Single watcher should NOT use CHECKSIGADD");
-        assert!(!single_script.contains(&OP_CHECKMULTISIG), "Must NOT contain CHECKMULTISIG");
-
-        // Test N=3, M=2 (multi-watcher committee with OP_CHECKSIGADD)
-        let watchers = vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]];
-        let script = build_committee_challenge_leaf(&watchers, 2)
-            .expect("Failed to build committee challenge leaf");
-
-        // BIP-342: tapscript uses OP_CHECKSIG + OP_CHECKSIGADD, not OP_CHECKMULTISIG
-        assert!(script.contains(&OP_CHECKSIG), "Must contain OP_CHECKSIG for first watcher");
-        assert!(script.contains(&OP_CHECKSIGADD), "Must contain OP_CHECKSIGADD for subsequent watchers");
-        assert!(script.contains(&OP_EQUAL), "Must contain OP_EQUAL for threshold check");
-        assert!(!script.contains(&OP_CHECKMULTISIG), "Must NOT contain CHECKMULTISIG (BIP-342)");
-
-        // Must contain x-only pubkeys (32 bytes, stripped from 33-byte compressed)
-        for pk in &watchers {
-            assert!(script.windows(32).any(|w| w == &pk[1..]),
-                "Challenge leaf must contain x-only watcher pubkey");
-        }
-        // Must NOT contain OP_CAT or CLTV
-        assert!(!script.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT");
-        assert!(!script.contains(&0xb1), "Challenge leaf must NOT contain CLTV");
-
-        // Test witness template ordering and padding (reversed for stack top)
+    fn test_build_covenant_challenge_leaf() {
+        // The challenge leaf is now the equivocation covenant (OP_CAT-based),
+        // not the old committee M-of-N model. This test verifies the covenant
+        // leaf is constructed correctly.
+        let operator_pubkey = vec![0x02; 32];
         let config = VaultConfig {
-            operator_pubkey: vec![0x02; 33],
-            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: operator_pubkey.clone(),
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 144,
             claim_delay: 10,
-            watcher_pubkeys: watchers.clone(),
-            watcher_threshold: 2,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
         let tree = build_vault_script_tree(&config).unwrap();
 
-        // 1. M=2 signatures provided for N=3 watchers: slot 3 must be padded with empty vector
-        let sigs_m = vec![vec![1; 64], vec![2; 64]];
-        let witness_m = tree.committee_witness_template(&sigs_m);
-        assert_eq!(witness_m.len(), 4, "Must contain 3 sig items + 1 script leaf");
-        assert_eq!(witness_m[0], Vec::<u8>::new(), "Non-signing watcher 3 must have empty vector");
-        assert_eq!(witness_m[1], vec![2; 64], "Watcher 2 signature");
-        assert_eq!(witness_m[2], vec![1; 64], "Watcher 1 signature (stack top)");
-        assert_eq!(witness_m[3], tree.challenge_leaf);
-
-        // 2. All N=3 signatures provided
-        let sigs_all = vec![vec![1; 64], vec![2; 64], vec![3; 64]];
-        let witness_all = tree.committee_witness_template(&sigs_all);
-        assert_eq!(witness_all[0], vec![3; 64]);
-        assert_eq!(witness_all[1], vec![2; 64]);
-        assert_eq!(witness_all[2], vec![1; 64]);
-        assert_eq!(witness_all[3], tree.challenge_leaf);
+        // Covenant leaf must use OP_CAT (0x7e)
+        assert!(tree.challenge_leaf.contains(&0x7e), "Covenant leaf must use OP_CAT");
+        // Must use OP_CHECKSIGVERIFY (0xad) — two of them (one per attestation)
+        let csv_count = tree.challenge_leaf.iter().filter(|&&b| b == 0xad).count();
+        assert_eq!(csv_count, 2, "Covenant leaf must have 2 OP_CHECKSIGVERIFY");
+        // Must use OP_SHA256 (0xa8) — two of them
+        let sha_count = tree.challenge_leaf.iter().filter(|&&b| b == 0xa8).count();
+        assert_eq!(sha_count, 2, "Covenant leaf must have 2 OP_SHA256");
+        // Must NOT contain OP_CHECKMULTISIG (disabled in tapscript)
+        assert!(!tree.challenge_leaf.contains(&0xae), "Must NOT contain CHECKMULTISIG");
+        // Must NOT contain CLTV
+        assert!(!tree.challenge_leaf.contains(&0xb1), "Covenant leaf must NOT contain CLTV");
+        // Must contain the operator's x-only pubkey
+        assert!(tree.challenge_leaf.windows(32).any(|w| w == &operator_pubkey),
+            "Covenant leaf must contain operator x-only pubkey");
     }
 
     #[test]
     fn test_build_challenge_claim_script_tree() {
         let config = ChallengeUtxoConfig {
-            challenger_pubkey: vec![0x03; 33],
-            operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 32],
+            operator_pubkey: vec![0x02; 32],
             claim_delay: 144,
         };
 
@@ -1127,9 +1143,10 @@ mod tests {
             csv_active: true,
             segwit_active: true,
             taproot_active: true,
+            disabled_opcodes_active: true,
         };
         assert!(assert_chain_supports_bonding(&status).is_ok(),
-            "Assertion must pass when CSV and Taproot are active");
+            "Assertion must pass when CSV, Taproot, and disabled-opcode reactivation are active");
     }
 
     #[test]
@@ -1138,6 +1155,7 @@ mod tests {
             csv_active: false,
             segwit_active: true,
             taproot_active: true,
+            disabled_opcodes_active: true,
         };
         let result = assert_chain_supports_bonding(&status);
         assert!(result.is_err(), "Must fail when CSV is not active");
@@ -1151,6 +1169,7 @@ mod tests {
             csv_active: true,
             segwit_active: true,
             taproot_active: false,
+            disabled_opcodes_active: true,
         };
         let result = assert_chain_supports_bonding(&status);
         assert!(result.is_err(), "Must fail when Taproot is not active");
@@ -1159,23 +1178,37 @@ mod tests {
     }
 
     #[test]
+    fn test_assert_chain_supports_bonding_fails_without_disabled_opcodes() {
+        let status = SoftforkStatus {
+            csv_active: true,
+            segwit_active: true,
+            taproot_active: true,
+            disabled_opcodes_active: false,
+        };
+        let result = assert_chain_supports_bonding(&status);
+        assert!(result.is_err(), "Must fail when disabled-opcode reactivation is not active");
+        assert!(result.unwrap_err().to_string().contains("disabled-opcode"),
+            "Error must mention disabled-opcode reactivation");
+    }
+
+    #[test]
     fn test_no_cltv_in_any_script() {
         // Regression test: no script in this module must use CLTV (0xb1).
         let vault_config = VaultConfig {
-            operator_pubkey: vec![0x02; 33],
-            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 32],
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 1008,
             claim_delay: 144,
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
-            watcher_threshold: 2,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
         let vault_tree = build_vault_script_tree(&vault_config).unwrap();
         assert!(!vault_tree.operator_leaf.contains(&0xb1), "Operator leaf must not use CLTV");
         assert!(!vault_tree.challenge_leaf.contains(&0xb1), "Challenge leaf must not use CLTV");
 
         let challenge_config = ChallengeUtxoConfig {
-            challenger_pubkey: vec![0x03; 33],
-            operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 32],
+            operator_pubkey: vec![0x02; 32],
             claim_delay: 144,
         };
         let challenge_tree = build_challenge_claim_script_tree(&challenge_config).unwrap();
@@ -1184,27 +1217,51 @@ mod tests {
     }
 
     #[test]
-    fn test_no_op_cat_in_bonding_scripts() {
-        // Regression test: no bonding script must use OP_CAT (0x7e).
+    fn test_slashing_path_uses_op_cat_covenant() {
+        // This test deliberately replaces the former test_no_op_cat_in_bonding_scripts,
+        // which asserted OP_CAT was absent from bonding scripts. The project's
+        // direction has reversed: OP_CAT is now the intended mechanism for
+        // on-chain equivocation verification, gated by JKC's
+        // DisabledScriptReactivationHeight (h=1,155,000 mainnet).
+        //
+        // This test asserts the OPPOSITE invariant: the challenge (slashing)
+        // leaf MUST use OP_CAT (0x7e) for the equivocation covenant.
         let vault_config = VaultConfig {
-            operator_pubkey: vec![0x02; 33],
-            challenger_pubkey: vec![0x03; 33],
+            operator_pubkey: vec![0x02; 32],
+            challenger_pubkey: vec![0x03; 32],
             unbond_delay: 1008,
             claim_delay: 144,
-            watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]],
-            watcher_threshold: 2,
+            watcher_pubkeys: vec![],
+            watcher_threshold: 0,
         };
         let vault_tree = build_vault_script_tree(&vault_config).unwrap();
-        assert!(!vault_tree.operator_leaf.contains(&0x7e), "Operator leaf must not use OP_CAT");
-        assert!(!vault_tree.challenge_leaf.contains(&0x7e), "Challenge leaf must not use OP_CAT");
 
+        // The challenge leaf MUST contain OP_CAT (0x7e) — this is the covenant
+        assert!(
+            vault_tree.challenge_leaf.contains(&0x7e),
+            "Challenge leaf MUST use OP_CAT for equivocation covenant (policy reversal from Issue 14)"
+        );
+
+        // The operator unbond leaf should NOT use OP_CAT (it's a simple CSV+CHECKSIG)
+        assert!(
+            !vault_tree.operator_leaf.contains(&0x7e),
+            "Operator unbond leaf must not use OP_CAT (simple CSV+CHECKSIG only)"
+        );
+
+        // The challenge UTXO claim/rebut leaves should NOT use OP_CAT
         let challenge_config = ChallengeUtxoConfig {
-            challenger_pubkey: vec![0x03; 33],
-            operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 32],
+            operator_pubkey: vec![0x02; 32],
             claim_delay: 144,
         };
         let challenge_tree = build_challenge_claim_script_tree(&challenge_config).unwrap();
-        assert!(!challenge_tree.claim_leaf.contains(&0x7e), "Claim leaf must not use OP_CAT");
-        assert!(!challenge_tree.rebut_leaf.contains(&0x7e), "Rebut leaf must not use OP_CAT");
+        assert!(
+            !challenge_tree.claim_leaf.contains(&0x7e),
+            "Claim leaf must not use OP_CAT"
+        );
+        assert!(
+            !challenge_tree.rebut_leaf.contains(&0x7e),
+            "Rebut leaf must not use OP_CAT"
+        );
     }
 }

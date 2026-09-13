@@ -31,9 +31,9 @@ fn test_fraud_watch_detects_divergence_on_minority_attestation() {
     let (sk3, pk3) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
 
     let consensus = ConsensusManager::new(2);
-    consensus.register_validator(&hex::encode(pk1.serialize()));
-    consensus.register_validator(&hex::encode(pk2.serialize()));
-    consensus.register_validator(&hex::encode(pk3.serialize()));
+    consensus.register_validator(&hex::encode(&pk1.serialize()[1..]));
+    consensus.register_validator(&hex::encode(&pk2.serialize()[1..]));
+    consensus.register_validator(&hex::encode(&pk3.serialize()[1..]));
 
     let chain = "JKC_TESTNET";
     let height = 9_001;
@@ -87,7 +87,7 @@ fn test_fraud_watch_equivocation_proof_to_challenge_tx() {
     let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
 
     let consensus = ConsensusManager::new(1);
-    consensus.register_validator(&hex::encode(pk.serialize()));
+    consensus.register_validator(&hex::encode(&pk.serialize()[1..]));
 
     let chain = "JKC_TESTNET";
     let height = 9_002;
@@ -110,7 +110,7 @@ fn test_fraud_watch_equivocation_proof_to_challenge_tx() {
     let proofs = consensus.get_slashing_proofs();
     assert_eq!(proofs.len(), 1, "exactly one equivocation proof expected");
     let proof = &proofs[0];
-    assert_eq!(proof.validator_pubkey, hex::encode(pk.serialize()));
+    assert_eq!(proof.validator_pubkey, hex::encode(&pk.serialize()[1..]));
     assert_eq!(proof.first_attestation.state_root, root1);
     assert_eq!(proof.second_attestation.state_root, root2);
 
@@ -120,7 +120,7 @@ fn test_fraud_watch_equivocation_proof_to_challenge_tx() {
 
     // Build a challenge tx from the proof, mirroring what the fraud-watch
     // task does when a vault config + bond UTXO are configured.
-    let pk_hex = hex::encode(pk.serialize());
+    let pk_hex = hex::encode(&pk.serialize()[1..]);
     let operator_pubkey = hex::decode(&pk_hex).unwrap();
 
     let input = ChallengeInput {
@@ -130,15 +130,14 @@ fn test_fraud_watch_equivocation_proof_to_challenge_tx() {
     };
     let vault_config = VaultConfig {
         operator_pubkey: operator_pubkey.clone(),
-        challenger_pubkey: vec![0x03; 33],
+        challenger_pubkey: vec![0x03; 32],
         unbond_delay: 60,
         claim_delay: 10,
-        watcher_pubkeys: vec![vec![0x04; 33], vec![0x05; 33]],
-        watcher_threshold: 1,
+        watcher_pubkeys: vec![],
+        watcher_threshold: 0,
     };
-    let watcher_sig = vec![0xAAu8; 64];
 
-    let tx = challenge::build_challenge_transaction(proof, &input, &vault_config, &[watcher_sig], 1000)
+    let tx = challenge::build_challenge_transaction(proof, &input, &vault_config, 1000)
         .expect("challenge tx must build from a verified equivocation proof");
 
     // The evidence output must carry the utxovm:challenge tag and both roots.
@@ -160,7 +159,7 @@ fn test_fraud_watch_rejects_invalid_proof_no_challenge_tx() {
     let (sk_other, _pk_other) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
 
     let consensus = ConsensusManager::new(1);
-    consensus.register_validator(&hex::encode(pk.serialize()));
+    consensus.register_validator(&hex::encode(&pk.serialize()[1..]));
 
     let chain = "JKC_TESTNET";
     let height = 9_003;
@@ -176,12 +175,12 @@ fn test_fraud_watch_rejects_invalid_proof_no_challenge_tx() {
     let mut att2 = consensus
         .sign_state_root(&sk_other, chain, height, block_hash, "root_b")
         .unwrap();
-    att2.validator_pubkey = hex::encode(pk.serialize());
+    att2.validator_pubkey = hex::encode(&pk.serialize()[1..]);
 
     let proof = utxo_vmd::types::EquivocationProof {
         chain: chain.to_string(),
         block_height: height,
-        validator_pubkey: hex::encode(pk.serialize()),
+        validator_pubkey: hex::encode(&pk.serialize()[1..]),
         first_attestation: att1,
         second_attestation: att2,
         detected_at: chrono::Utc::now().timestamp(),
@@ -198,18 +197,17 @@ fn test_fraud_watch_rejects_invalid_proof_no_challenge_tx() {
         bond_amount: 50_000_000,
     };
     let vault_config = VaultConfig {
-        operator_pubkey: vec![0x01; 33],
-        challenger_pubkey: vec![0x02; 33],
+        operator_pubkey: vec![0x01; 32],
+        challenger_pubkey: vec![0x02; 32],
         unbond_delay: 60,
         claim_delay: 10,
-        watcher_pubkeys: vec![vec![0x04; 33]],
-        watcher_threshold: 1,
+        watcher_pubkeys: vec![],
+        watcher_threshold: 0,
     };
     let result = challenge::build_challenge_transaction(
         &proof,
         &input,
         &vault_config,
-        &[vec![0xAA; 64]],
         1000,
     );
     assert!(
