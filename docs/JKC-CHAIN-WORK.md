@@ -8,14 +8,18 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 
 | Soft fork | Testnet | Mainnet |
 |:---|:---|:---|
-| CSV (BIP-68) | ✅ Active (h=120,000) | ✅ Active |
-| SegWit (BIP-141) | ✅ Active (h=140,000) | ✅ Active |
-| Taproot (BIP-341) | ✅ Active (h=160,000) | ✅ Active |
+| CSV (BIP-68) | ✅ Active (h=120,000) | ❌ Not yet active (scheduled h=1,145,000, junkcoin-core v4.0.3) |
+| SegWit (BIP-141) | ✅ Active (h=140,000) | ❌ Not yet active (scheduled h=1,145,000, concurrent with CSV) |
+| Taproot (BIP-341) | ✅ Active (h=160,000) | ❌ Not yet active (scheduled h=1,155,000) |
 | CLTV (BIP-65) | ❌ Not active (bip65=99,999,999) | ✅ Active |
-| OP_CAT | ✅ Active (confirmed by developer) | ✅ Active |
-| MWEB | ✅ Active (verified h=183,374 — HogEx tx present in blocks) | ❌ Not active (optional/later) |
+| OP_CAT | ✅ Active (confirmed by developer) | ❌ Not yet active (scheduled h=1,155,000, concurrent with Taproot) |
+| MWEB | ✅ Active (verified h=183,374 — HogEx tx present in blocks) | ❌ Not yet active (scheduled h=1,165,000) |
 
-> Source: `packages/node/src/consensus/l1_scripts.rs` header comment.
+> Source: `packages/node/src/consensus/l1_scripts.rs` header comment (testnet);
+> mainnet schedule from [junkcoin-core v4.0.3](https://github.com/Junkcoin-Foundation/junkcoin/releases/tag/v4.0.3)
+> (released 2026-09-12). Mainnet height at investigation: 1,130,195 — all softforks below
+> 1,145,000 are NOT yet active. Bonding (`--bonding-enabled`) is testnet-only until CSV
+> activates at 1,145,000.
 > Note: CLTV is available on mainnet but NOT on testnet. Testnet scripts use CSV only.
 > OP_CAT is active on testnet — not used in live bonding scripts (covenants.rs deleted in Issue 14).
 
@@ -216,8 +220,8 @@ let seal_script = script! {
 - [x] BIP-342 compliance: CHECKSIGADD (not CHECKMULTISIG), x-only pubkeys, TapSighashType::All
 
 ### Mainnet Deployment
-- [ ] Taproot activation verification (mainnet)
-- [ ] CSV/SegWit availability verification (mainnet)
+- [x] Taproot activation verification (mainnet) — scheduled h=1,155,000 (v4.0.3), NOT yet active at h=1,130,195
+- [x] CSV/SegWit availability verification (mainnet) — scheduled h=1,145,000 (v4.0.3), NOT yet active at h=1,130,195
 - [x] CLTV status verification (mainnet active)
-- [x] OP_CAT status verification (testnet active)
+- [x] OP_CAT status verification (testnet active; mainnet scheduled h=1,155,000)
 - [ ] Address format verification

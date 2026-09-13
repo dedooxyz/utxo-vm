@@ -30,4 +30,30 @@
 ## What is still a stub
 - On-chain divergence verification (Bitcoin Script cannot verify off-chain WASM execution).
 - Watcher committee selection and key management.
-- The `unknown new rules activated (versionbit 21)` warning on JKC mainnet is unresolved — investigate with `junkcoind --version` and `getnetworkinfo`.
+
+## JKC mainnet softfork status (investigated 2026-09-13)
+
+**Resolved: versionbit 21 warning.** The `unknown new rules activated (versionbit 21)` warning
+from `getblockchaininfo` means miners are signaling BIP9 bit 21 (`1 << 21 = 0x200000`) in
+block `nVersion`, but `junkcoind` v4.0.3 has no deployment registered for that bit. This is
+NOT any of the known softforks — CSV, SegWit, Taproot, and MWEB are all "buried"
+(height-gated, not BIP9 version bits), and `testdummy` (the only BIP9 deployment) uses a
+different bit and has status "failed". Junkcoin is forked from Litecoin Core v0.21.4, so bit 21
+is most likely an inherited deployment slot that is not relevant to Junkcoin's consensus. No
+rules are enforced for bit 21, so this warning is benign for UTXO-VM — the bonding path checks
+`query_softfork_status()` which reads the `active` field for CSV/Taproot, not version bits.
+
+**Mainnet softfork activation schedule (junkcoin-core v4.0.3, released 2026-09-12):**
+
+| Softfork | Activation height | Status (as of h=1,130,195) |
+|:---|:---|:---|
+| CSV (BIP 68/112/113) | 1,145,000 | NOT YET ACTIVE (~14,805 blocks / ~10 days away) |
+| SegWit (BIP 141/143/147) | 1,145,000 | NOT YET ACTIVE (concurrent with CSV) |
+| Taproot (BIP 340/341/342) | 1,155,000 | NOT YET ACTIVE (~24,805 blocks / ~17 days away) |
+| Re-enabled Opcodes (OP_CAT etc.) | 1,155,000 | NOT YET ACTIVE (concurrent with Taproot) |
+| MWEB | 1,165,000 | NOT YET ACTIVE (~34,805 blocks / ~24 days away) |
+
+**Implication for UTXO-VM:** Bonding (`--bonding-enabled`) is NOT yet possible on JKC mainnet.
+`assert_chain_supports_bonding()` will correctly refuse to start because `csv_active=false`
+and `taproot_active=false` at the current height. Bonding is testnet-only until CSV activates
+at block 1,145,000. Source: [junkcoin-core v4.0.3 release](https://github.com/Junkcoin-Foundation/junkcoin/releases/tag/v4.0.3).

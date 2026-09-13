@@ -9,7 +9,16 @@
 //!   bip65:   active=false on testnet (height=99999999), ACTIVE on mainnet
 //!   op_cat:  active=true on testnet (confirmed by developer)
 //!
-//! All timelocks use OP_CHECKSEQUENCEVERIFY (CSV, active at height 120,000).
+//! MAINNET STATUS (junkcoin-core v4.0.3, released 2026-09-12, investigated at h=1,130,195):
+//!   csv:     active=false, scheduled h=1,145,000
+//!   segwit:  active=false, scheduled h=1,145,000 (concurrent with CSV)
+//!   taproot: active=false, scheduled h=1,155,000
+//!   op_cat:  active=false, scheduled h=1,155,000 (concurrent with Taproot)
+//!   mweb:    active=false, scheduled h=1,165,000
+//! Bonding (--bonding-enabled) is testnet-only until CSV activates at 1,145,000.
+//! assert_chain_supports_bonding() correctly refuses to start on mainnet today.
+//!
+//! All timelocks use OP_CHECKSEQUENCEVERIFY (CSV, active at height 120,000 on testnet).
 //! CLTV is available on mainnet but NOT on testnet — use CSV for testnet scripts.
 //! Hash comparison uses OP_EQUAL/OP_EQUALVERIFY (universal, no OP_CAT dependency).
 //! (Issue 14: covenants.rs OP_CAT code deleted; live bonding scripts never used OP_CAT.)
