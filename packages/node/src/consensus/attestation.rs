@@ -21,17 +21,24 @@ fn compute_attestation_merkle_root(attestations: &[StateAttestation]) -> String 
     let mut sorted: Vec<&StateAttestation> = attestations.iter().collect();
     sorted.sort_by(|a, b| a.validator_pubkey.cmp(&b.validator_pubkey));
 
-    // Leaf hash: SHA256("ATTESTATION_LEAF" || canonical_attestation_bytes)
+    // Leaf hash: SHA256("ATTESTATION_LEAF_V1" || len-prefixed canonical fields)
+    // Length-prefixing prevents field-boundary ambiguity (same hygiene as
+    // hash_attestation_payload). Versioned suffix for future format changes.
     let leaf_hashes: Vec<[u8; 32]> = sorted
         .iter()
         .map(|a| {
             let mut hasher = Sha256::new();
-            hasher.update(b"ATTESTATION_LEAF");
+            hasher.update(b"ATTESTATION_LEAF_V1");
+            hasher.update(&(a.chain.len() as u32).to_be_bytes());
             hasher.update(a.chain.as_bytes());
             hasher.update(&a.block_height.to_be_bytes());
+            hasher.update(&(a.block_hash.len() as u32).to_be_bytes());
             hasher.update(a.block_hash.as_bytes());
+            hasher.update(&(a.state_root.len() as u32).to_be_bytes());
             hasher.update(a.state_root.as_bytes());
+            hasher.update(&(a.validator_pubkey.len() as u32).to_be_bytes());
             hasher.update(a.validator_pubkey.as_bytes());
+            hasher.update(&(a.signature_hex.len() as u32).to_be_bytes());
             hasher.update(a.signature_hex.as_bytes());
             // timestamp is metadata — excluded from the Merkle leaf hash for determinism
             let result = hasher.finalize();
@@ -101,9 +108,21 @@ impl ConsensusManager {
         }
     }
 
+    /// Domain-separated, length-prefixed attestation payload hash.
+    ///
+    /// Format (v1):
+    ///   SHA256( "UTXO_VM_ATTESTATION_V1" || u32(len(chain)) || chain
+    ///         || u64(height) || u32(len(block_hash)) || block_hash
+    ///         || u32(len(state_root)) || state_root )
+    ///
+    /// Versioning: the `_V1` suffix in the domain separator distinguishes this
+    /// construction from any future format. A v2 hash MUST use a distinct
+    /// suffix (e.g. `UTXO_VM_ATTESTATION_V2`) so old and new signatures cannot
+    /// be confused. Changing this string is a consensus-breaking action and
+    /// requires coordinated rollout across all validator operators.
     pub fn hash_attestation_payload(chain: &str, height: u64, block_hash: &str, state_root: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"UTXO_VM_ATTESTATION");
+        hasher.update(b"UTXO_VM_ATTESTATION_V1");
         hasher.update(&(chain.len() as u32).to_be_bytes());
         hasher.update(chain.as_bytes());
         hasher.update(&height.to_be_bytes());

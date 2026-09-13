@@ -3,14 +3,16 @@
 ## What L1 checks
 - Bond UTXO is P2TR with a 2-leaf script tree (Model B, committee-gated).
 - Leaf 1 (unbond): `<delay> CSV DROP <operator_xonly_pubkey> CHECKSIG`.
-- Leaf 2 (challenge): `<xonly_pk1> CHECKSIG <xonly_pk2> CHECKSIG ... OP_ADD OP_ADD ... <M> OP_EQUAL` — M-of-N watcher committee (BIP-342: individual CHECKSIG, not CHECKMULTISIG).
+- Leaf 2 (challenge): `<xonly_pk1> CHECKSIG <xonly_pk2> CHECKSIGADD ... <xonly_pkN> CHECKSIGADD <M> OP_EQUAL` — M-of-N watcher committee (BIP-342: individual CHECKSIG + CHECKSIGADD, not CHECKMULTISIG).
 - Challenge UTXO (second stage): claim leaf (CSV delay + challenger x-only sig), rebut leaf (operator x-only sig, no timelock).
 - No CLTV, no OP_CAT. CSV + Taproot only, verified at startup (one-time hard fail).
 - BIP-342 compliance: all tapscript leaves use 32-byte x-only pubkeys and `TapSighashType::All` for script-path spends.
 
 ## What operators check
 - Re-execute WASM deterministically; sign `(chain, height, block_hash, state_root)`.
+- Signed payload hash: `SHA256("UTXO_VM_ATTESTATION_V1" || len-prefixed fields)`. Versioned domain separator; changing it is consensus-breaking and requires coordinated rollout.
 - Quorum result = state_root with most attestations (threshold met).
+- Scanner monitors L1 block hash continuity and automatically rolls back state via `rollback_to_block` on chain reorgs.
 
 ## How a liar loses JKC
 - Operator signs a divergent state_root.
