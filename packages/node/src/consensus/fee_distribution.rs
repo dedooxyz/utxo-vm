@@ -89,7 +89,10 @@ impl FeeDistribution {
     ) -> Result<FeeEnvelope> {
         // Use FeeParams for indexer fee calculation (overflow-safe)
         let indexer_fee = calculate_indexer_fee(params, total_fee);
-        let operator_pool = total_fee.saturating_sub(indexer_fee);
+        // Issue 15: Use the shared calculate_operator_pool helper instead of
+        // duplicating the subtraction, so there's only one implementation to
+        // keep correct.
+        let operator_pool = calculate_operator_pool(params, total_fee);
 
         let envelope = FeeEnvelope {
             total_fee,
@@ -258,7 +261,11 @@ pub fn calculate_indexer_fee(params: &FeeParams, total_fee: u64) -> u64 {
 /// Calculate operator pool from total
 pub fn calculate_operator_pool(params: &FeeParams, total_fee: u64) -> u64 {
     let indexer_fee = calculate_indexer_fee(params, total_fee);
-    total_fee - indexer_fee
+    // Issue 15: Use saturating_sub to prevent integer underflow when
+    // min_indexer_fee exceeds total_fee (e.g. total_fee=500, min_indexer_fee=1000).
+    // The inline calculation in create_fee_envelope_with_params already does this
+    // correctly; this function now matches that safe behavior.
+    total_fee.saturating_sub(indexer_fee)
 }
 
 #[cfg(test)]
@@ -391,5 +398,26 @@ mod tests {
         let indexer_fee = calculate_indexer_fee(&params, 5000);
         // 10% of 5000 = 500, but minimum is 1000
         assert_eq!(indexer_fee, 1000);
+    }
+
+    #[test]
+    fn test_calculate_operator_pool_underflow_safe() {
+        // Issue 15: When total_fee < min_indexer_fee, calculate_operator_pool
+        // must return 0 (via saturating_sub), not panic or wrap to u64::MAX.
+        let params = FeeParams::default(); // min_indexer_fee = 1000
+
+        // total_fee = 500 < min_indexer_fee = 1000
+        // indexer_fee = max(10% of 500 = 50, 1000) = 1000
+        // operator_pool = 500 - 1000 → must saturate to 0
+        let pool = calculate_operator_pool(&params, 500);
+        assert_eq!(pool, 0, "operator_pool must be 0 when total_fee < indexer_fee, not panic or wrap");
+
+        // Sanity: normal case still works
+        let pool_normal = calculate_operator_pool(&params, 10000);
+        assert_eq!(pool_normal, 9000);
+
+        // Edge: total_fee == min_indexer_fee exactly
+        let pool_edge = calculate_operator_pool(&params, 1000);
+        assert_eq!(pool_edge, 0);
     }
 }
