@@ -23,6 +23,18 @@ impl BlockProcessor {
         min_execution_fee: u64,
         fee_collector: Option<String>,
     ) -> Self {
+        // Issue 13: Warn when min_execution_fee > 0 but no fee_collector is set.
+        // Without a collector, any output with sufficient value satisfies the
+        // fee check — including self-paid change. This provides minimal
+        // anti-spam guarantee. Production/mainnet configs SHOULD set fee_collector.
+        if min_execution_fee > 0 && fee_collector.is_none() {
+            warn!(
+                "[Processor] min_execution_fee={} but fee_collector is not set. \
+                Self-paid outputs will satisfy the fee check, providing minimal \
+                anti-spam guarantee. Set --fee-collector for production use.",
+                min_execution_fee
+            );
+        }
         let config = VmConfig {
             max_gas: 25_000_000,
             max_memory_pages: 32,
@@ -39,8 +51,17 @@ impl BlockProcessor {
 
     /// Validate that the transaction includes required micro-fee output.
     /// Fee validation ensures at least one output carries value >= min_execution_fee.
-    /// When fee_collector is set, the output's scriptpubkey (ASM) must contain
-    /// the fee collector address to confirm payment destination.
+    ///
+    /// Issue 13: When `fee_collector` is set, the output's `scriptpubkey` (hex)
+    /// must match the collector EXACTLY — not as a substring. Substring matching
+    /// could false-positive on an unrelated script that coincidentally contains
+    /// the collector address as a substring.
+    ///
+    /// Issue 13: When `fee_collector` is NOT set, any output with sufficient
+    /// value qualifies — including a change output paid back to the sender.
+    /// This provides little anti-spam guarantee beyond L1 dust limits.
+    /// Production/mainnet configs SHOULD set `fee_collector`. A startup warning
+    /// is logged when `min_execution_fee > 0` but `fee_collector` is unset.
     fn validate_fee(&self, tx: &ElectrsTx) -> bool {
         if self.min_execution_fee == 0 {
             return true;
@@ -52,18 +73,14 @@ impl BlockProcessor {
             }
 
             if let Some(ref collector) = self.fee_collector {
-                // Match scriptpubkey_asm or scriptpubkey against the collector address
-                if let Some(ref asm) = out.scriptpubkey_asm {
-                    if asm.contains(collector) {
-                        return true;
-                    }
-                }
-                // Fallback: check the raw scriptpubkey string
-                if out.scriptpubkey.contains(collector) {
+                // Exact match on scriptpubkey hex — not substring containment.
+                if out.scriptpubkey == *collector {
                     return true;
                 }
             } else {
-                // No specific collector; any output with sufficient value qualifies
+                // No specific collector; any output with sufficient value qualifies.
+                // WARNING: this includes self-paid change outputs and provides
+                // minimal anti-spam guarantee. See Issue 13.
                 return true;
             }
         }

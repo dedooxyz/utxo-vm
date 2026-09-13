@@ -195,7 +195,7 @@ fn test_fee_enforcement_with_collector() {
     let result = processor.process_tx(&tx_wrong_collector, 300).expect("Process should not error");
     assert!(result.is_none(), "Transaction with wrong fee collector should be rejected");
 
-    // Transaction WITH fee output to correct collector (scriptpubkey_asm contains the collector)
+    // Transaction WITH fee output to correct collector (scriptpubkey matches exactly)
     let create_payload2 = br#"{"op":"create","code_hash":"wasm_default2"}"#;
     let create_script2 = build_envelope_script(create_payload2);
 
@@ -220,6 +220,56 @@ fn test_fee_enforcement_with_collector() {
 
     let result = processor.process_tx(&tx_with_collector, 301).expect("Process should succeed");
     assert!(result.is_some(), "Transaction with fee collector output should be accepted");
+}
+
+#[test]
+fn test_fee_enforcement_substring_false_positive_rejected() {
+    // Issue 13: A scriptpubkey_asm that coincidentally contains the collector
+    // address as a substring — without actually paying it — must be rejected.
+    // Before the fix, validate_fee used asm.contains(collector) which would
+    // false-positive on this input.
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_fee_substring.redb");
+
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let min_fee = 1000;
+    let fee_collector = "fee_collector_addr".to_string();
+    let processor = BlockProcessor::new(
+        store.clone(),
+        "JKC_TESTNET".to_string(),
+        min_fee,
+        Some(fee_collector.clone()),
+    );
+
+    let create_payload = br#"{"op":"create","code_hash":"wasm_default"}"#;
+    let create_script = build_envelope_script(create_payload);
+
+    // The scriptpubkey_asm contains "fee_collector_addr" as a substring,
+    // but the actual scriptpubkey is a completely different script.
+    // Under the old substring matching, this would false-positive.
+    let tx_substring_trap = ElectrsTx {
+        txid: "7777777777777777777777777777777777777777777777777777777777777777".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 1500,
+            scriptpubkey: hex::encode(&create_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&create_script)),
+        }, ElectrsTxOutput {
+            value: 1000,
+            // scriptpubkey does NOT match the collector exactly
+            scriptpubkey: "some_other_script".to_string(),
+            // BUT scriptpubkey_asm coincidentally contains the collector address
+            scriptpubkey_asm: Some("OP_DUP OP_HASH160 fee_collector_addr OP_EQUALVERIFY OP_CHECKSIG".to_string()),
+            scriptpubkey_hex: Some("76a914deadbeef88ac".to_string()),
+        }],
+    };
+
+    let result = processor.process_tx(&tx_substring_trap, 400).expect("Process should not error");
+    assert!(result.is_none(), "Transaction with substring-only collector match must be rejected");
 }
 
 #[test]
