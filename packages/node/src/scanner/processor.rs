@@ -200,11 +200,22 @@ impl BlockProcessor {
 
                         // Execute WASM if code_hash is available (not default placeholder)
                         let (new_state, gas_consumed) = if obj.code_hash != "wasm_default" {
-                            match self.execute_wasm(&obj, &method, &args, &sender, out.value) {
+                            // Fetch WASM bytecode before executing
+                            let wasm_bytes = match self.get_wasm_bytes(&obj.code_hash) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    warn!(
+                                        "[Processor] Failed to fetch WASM for {}: {} — reverting, no state change",
+                                        obj.object_id, e
+                                    );
+                                    return Ok(None);
+                                }
+                            };
+                            match self.execute_wasm(&obj, &method, &args, &sender, out.value, &wasm_bytes) {
                                 Ok(result) => (result.state_data, result.gas_consumed),
                                 Err(e) => {
-                                    // WASM execution failed — must NOT mutate state.
-                                    // Revert: skip this transaction entirely.
+                                    // WASM execution failed (including non-JSON state parse failure)
+                                    // — must NOT mutate state. Revert: skip this transaction entirely.
                                     warn!(
                                         "[Processor] WASM execution failed for {}: {} — reverting, no state change",
                                         obj.object_id, e
@@ -267,13 +278,14 @@ impl BlockProcessor {
     }
 
     /// Execute WASM contract via core-vm runtime
-    fn execute_wasm(
+    pub fn execute_wasm(
         &self,
         obj: &SmartObjectRecord,
         method: &str,
         args: &serde_json::Value,
         caller: &str,
         satoshis: u64,
+        wasm_bytes: &[u8],
     ) -> Result<WasmExecutionResult> {
         use utxo_core_vm::state::{SingleUseSeal, SmartObjectState};
 
@@ -294,9 +306,6 @@ impl BlockProcessor {
             state_data: serde_json::to_vec(&obj.state_data).unwrap_or_default(),
         };
 
-        // Get WASM bytecode from DHT or use placeholder
-        let wasm_bytes = self.get_wasm_bytes(&obj.code_hash)?;
-
         // Execute via runtime
         let exec_result = self.runtime.execute(
             &wasm_bytes,
@@ -306,9 +315,17 @@ impl BlockProcessor {
             args.to_string().as_bytes(),
         ).map_err(|e| anyhow!("VM execution failed: {}", e))?;
 
-        // Parse new state from execution result
+        // Parse new state from execution result.
+        // Issue 10: A parse failure must be a hard error, not a silent fallback
+        // to old state. Without this, the object's seal/owner/satoshis move
+        // forward while contract state quietly stays frozen — a partially-
+        // applied transition indistinguishable from a contract that legitimately
+        // returned unchanged state.
         let new_state: serde_json::Value = serde_json::from_slice(&exec_result.updated_state_data)
-            .unwrap_or(obj.state_data.clone());
+            .map_err(|e| anyhow!(
+                "VM returned non-JSON state data ({} bytes): parse failed: {} — reverting transaction",
+                exec_result.updated_state_data.len(), e
+            ))?;
 
         Ok(WasmExecutionResult {
             state_data: new_state,
@@ -333,7 +350,8 @@ impl BlockProcessor {
     }
 }
 
-struct WasmExecutionResult {
-    state_data: serde_json::Value,
-    gas_consumed: u64,
+#[derive(Debug)]
+pub struct WasmExecutionResult {
+    pub state_data: serde_json::Value,
+    pub gas_consumed: u64,
 }

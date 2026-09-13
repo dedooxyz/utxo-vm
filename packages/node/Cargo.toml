@@ -45,3 +45,4 @@ path = "src/lib.rs"
 tempfile = "3.10"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+wat = "1.257"

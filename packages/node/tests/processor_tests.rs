@@ -1,6 +1,7 @@
 use utxo_vmd::scanner::electrs::{ElectrsTx, ElectrsTxInput, ElectrsTxOutput};
 use utxo_vmd::scanner::BlockProcessor;
 use utxo_vmd::storage::StateStore;
+use utxo_vmd::types::SmartObjectRecord;
 
 /// Build a valid utxovm envelope script:
 /// OP_FALSE OP_IF <push "utxovm"> <push 0x01> <push "application/json"> <push payload> OP_ENDIF
@@ -219,4 +220,116 @@ fn test_fee_enforcement_with_collector() {
 
     let result = processor.process_tx(&tx_with_collector, 301).expect("Process should succeed");
     assert!(result.is_some(), "Transaction with fee collector output should be accepted");
+}
+
+#[test]
+fn test_execute_wasm_non_json_state_returns_error() {
+    // Issue 10: When a WASM contract returns non-JSON state data from
+    // get_state, execute_wasm must return Err (not silently fall back to
+    // old state). This test calls execute_wasm directly with a WAT module
+    // that returns raw non-JSON bytes from get_state.
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_nonjson.redb");
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), 0, None);
+
+    // WAT module that returns non-JSON bytes from get_state.
+    // get_state writes "NOT_JSON\x00" to the output buffer and returns 9.
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "allocate") (param $size i32) (result i32) (i32.const 0x1000))
+            (func (export "get_state") (param $out_ptr i32) (result i32)
+                (i32.store8 (i32.const 0x1000) (i32.const 0x4e))  ;; N
+                (i32.store8 (i32.const 0x1001) (i32.const 0x4f))  ;; O
+                (i32.store8 (i32.const 0x1002) (i32.const 0x54))  ;; T
+                (i32.store8 (i32.const 0x1003) (i32.const 0x5f))  ;; _
+                (i32.store8 (i32.const 0x1004) (i32.const 0x4a))  ;; J
+                (i32.store8 (i32.const 0x1005) (i32.const 0x53))  ;; S
+                (i32.store8 (i32.const 0x1006) (i32.const 0x4f))  ;; O
+                (i32.store8 (i32.const 0x1007) (i32.const 0x4e))  ;; N
+                (i32.store8 (i32.const 0x1008) (i32.const 0x00))  ;; null
+                (i32.const 9)
+            )
+            (func (export "call") (param i32 i32 i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+
+    let obj = SmartObjectRecord {
+        object_id: "obj_nonjson_test".to_string(),
+        code_hash: utxo_core_vm::VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: "aabbccdd11223344:0".to_string(),
+        satoshis: 1000,
+        owner: "alice".to_string(),
+        state_data: serde_json::json!({"balance": 500}),
+        created_at_block: 1,
+        updated_at_block: 1,
+    };
+
+    let result = processor.execute_wasm(
+        &obj,
+        "transfer",
+        &serde_json::json!({"to": "bob", "amount": 100}),
+        "alice",
+        1000,
+        &wasm_bytes,
+    );
+
+    assert!(result.is_err(), "execute_wasm with non-JSON state must return Err");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("non-JSON"),
+        "Error should mention non-JSON parse failure, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_execute_wasm_valid_json_state_succeeds() {
+    // Issue 10 regression: a contract that returns valid JSON must still
+    // succeed (no false rejection from the parse-failure fix).
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_validjson.redb");
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), 0, None);
+
+    // WAT module that returns valid JSON '{}' from get_state.
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "allocate") (param $size i32) (result i32) (i32.const 0x1000))
+            (func (export "get_state") (param $out_ptr i32) (result i32)
+                (i32.store8 (i32.const 0x1000) (i32.const 0x7b))  ;; {
+                (i32.store8 (i32.const 0x1001) (i32.const 0x7d))  ;; }
+                (i32.const 2)
+            )
+            (func (export "call") (param i32 i32 i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+
+    let obj = SmartObjectRecord {
+        object_id: "obj_validjson_test".to_string(),
+        code_hash: utxo_core_vm::VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: "aabbccdd11223344:0".to_string(),
+        satoshis: 1000,
+        owner: "alice".to_string(),
+        state_data: serde_json::json!({"balance": 500}),
+        created_at_block: 1,
+        updated_at_block: 1,
+    };
+
+    let result = processor.execute_wasm(
+        &obj,
+        "transfer",
+        &serde_json::json!({"to": "bob", "amount": 100}),
+        "alice",
+        1000,
+        &wasm_bytes,
+    );
+
+    assert!(result.is_ok(), "execute_wasm with valid JSON state must succeed, got: {:?}", result.err());
+    let exec_result = result.unwrap();
+    assert_eq!(exec_result.state_data, serde_json::json!({}));
 }
