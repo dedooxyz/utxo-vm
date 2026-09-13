@@ -72,7 +72,14 @@ fn verify_bridge_auth(
                     )
                 })?;
 
-            if token != expected {
+            // Issue 11: Constant-time comparison. Hash both sides and compare
+            // the digests. This avoids short-circuit timing leaks from direct
+            // string inequality (which exits on the first differing byte) and
+            // normalizes length (avoids a separate length-based timing leak).
+            use sha2::{Digest, Sha256};
+            let token_hash = Sha256::digest(token.as_bytes());
+            let expected_hash = Sha256::digest(expected.as_bytes());
+            if token_hash != expected_hash {
                 return Err((
                     StatusCode::FORBIDDEN,
                     "Invalid API key".to_string(),
