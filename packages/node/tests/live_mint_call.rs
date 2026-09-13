@@ -333,7 +333,7 @@ async fn live_equivocation_and_challenge_build() {
     println!("[LIVE]   Root 2 (malicious): {}", proof.second_attestation.state_root);
 
     // Verify the proof cryptographically
-    assert!(utxo_vmd::consensus::covenants::verify_equivocation_proof(proof));
+    assert!(utxo_vmd::consensus::attestation::verify_equivocation_proof(proof));
     println!("[LIVE] Equivocation proof verified: OK");
 
     // Build challenge tx (not broadcast — this would slash a real bond)

@@ -21,8 +21,7 @@ use bitcoin::Witness;
 use reqwest::Client as HttpClient;
 use sha2::{Digest, Sha256};
 
-use utxo_vmd::consensus::attestation::ConsensusManager;
-use utxo_vmd::consensus::covenants;
+use utxo_vmd::consensus::attestation::{self, ConsensusManager};
 use utxo_vmd::consensus::l1_scripts;
 
 const ELECTRS_URL: &str = "https://jkc-testnet-api.s3na.xyz";
@@ -270,7 +269,7 @@ async fn live_deploy_p2tr_vault_and_challenge() {
     let proofs = mgr.get_slashing_proofs();
     assert_eq!(proofs.len(), 1);
     let proof = &proofs[0];
-    assert!(covenants::verify_equivocation_proof(proof));
+    assert!(attestation::verify_equivocation_proof(proof));
     println!("[LIVE] Equivocation proof created and verified");
 
     // Build the challenge tx that spends the vault via script path

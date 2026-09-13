@@ -21,7 +21,7 @@
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 
-use crate::consensus::covenants;
+use crate::consensus::attestation;
 use crate::consensus::l1_scripts::{
     self, ChallengeScriptTree, ChallengeUtxoConfig, VaultConfig,
 };
@@ -157,7 +157,7 @@ pub fn build_challenge_transaction(
     miner_fee: u64,
 ) -> Result<ChallengeTransaction> {
     // 1. Verify the equivocation proof cryptographically
-    if !covenants::verify_equivocation_proof(proof) {
+    if !attestation::verify_equivocation_proof(proof) {
         return Err(anyhow!(
             "Equivocation proof failed cryptographic verification — cannot build challenge tx"
         ));

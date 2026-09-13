@@ -75,6 +75,6 @@ fn test_equivocation_slashing_proof_capture() {
     assert_eq!(proofs[0].second_attestation.state_root, "fork_state_root_evil");
 
     // Cryptographically verify the equivocation proof
-    assert!(utxo_vmd::consensus::covenants::verify_equivocation_proof(&proofs[0]));
+    assert!(utxo_vmd::consensus::attestation::verify_equivocation_proof(&proofs[0]));
 }
 

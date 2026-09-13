@@ -168,7 +168,7 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 | Two replays match | **Done** | `test_deterministic_replay_identical_root` — two independent `VmRuntime` instances, same fixture, identical state |
 | Mock proofs gated | **Done** | `zk.rs` behind `#[cfg(feature = "experimental-zk")]`, mock acceptance only in `#[cfg(test)]` |
 | host_verify_groth16 gated | **Done** | Behind `#[cfg(feature = "experimental-zk")]` in linker |
-| OP_CAT covenants gated | **Done** | Behind `#[cfg(feature = "experimental-scripts")]` in node |
+| OP_CAT covenants deleted | **Done** | `covenants.rs` removed (Issue 14); `verify_equivocation_proof` moved to `attestation.rs` |
 | ZK deps optional | **Done** | `ark-*` behind `optional = true` + `experimental-zk` feature |
 | Fuel exhaustion reverts | **Done** | `test_fuel_exhaustion_no_state_write` verifies state unchanged after fuel error |
 | Abort traps test | **Done** | `test_abort_traps` — WAT calling `env.abort` traps successfully |

@@ -17,7 +17,7 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 
 > Source: `packages/node/src/consensus/l1_scripts.rs` header comment.
 > Note: CLTV is available on mainnet but NOT on testnet. Testnet scripts use CSV only.
-> OP_CAT is active on testnet — covenants.rs uses OP_CAT behind `experimental-scripts` feature.
+> OP_CAT is active on testnet — not used in live bonding scripts (covenants.rs deleted in Issue 14).
 
 ### Required Features
 - [x] P2TR (Pay-to-Taproot) support
@@ -200,7 +200,7 @@ let seal_script = script! {
 | SegWit (BIP-141) | ✅ Active | Verified at h=140,000 |
 | CHECKSIGADD | ✅ Active | Tapscript |
 | CLTV (BIP-65) | ✅ Mainnet / ❌ Testnet | Testnet bip65=99,999,999; mainnet active |
-| OP_CAT | ✅ Active | Testnet confirmed; covenants behind `experimental-scripts` |
+| OP_CAT | ✅ Active | Testnet confirmed; not used in live bonding scripts (covenants.rs deleted in Issue 14) |
 | MWEB | ⏳ Planned | Not yet active (h=180,000 planned, optional/later) |
 
 ## 8. Testing

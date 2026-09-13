@@ -164,7 +164,7 @@ L1 never runs WASM.
 Slash v1 = equivocation only (two signed attestations).  
 Invalid-transition slash = re-execute + operator vote or later fraud game. Not ZK until a real circuit exists.
 
-Do not claim JKC “has Taproot + OP_CAT activated” unless you cite a JKC Core merge + activation height in-repo. If uncertain, write “planned.” Script builders must use Bitcoin script-num encoding. No 32-byte CHECKSIG keys. Incomplete CAT scripts must compile only behind `feature = "experimental-scripts"`. Tapscript leaves must use BIP-342 x-only pubkeys (32 bytes) and individual `OP_CHECKSIG` (not `OP_CHECKMULTISIG`, which is disabled in tapscript). Script-path spends must use `TapSighashType::All`, not `Default`.
+Do not claim JKC "has Taproot + OP_CAT activated" unless you cite a JKC Core merge + activation height in-repo. If uncertain, write "planned." Script builders must use Bitcoin script-num encoding. No 32-byte CHECKSIG keys. OP_CAT covenant code was deleted in Issue 14 — do not reintroduce OP_CAT into live bonding scripts. Tapscript leaves must use BIP-342 x-only pubkeys (32 bytes) and individual `OP_CHECKSIG` (not `OP_CHECKMULTISIG`, which is disabled in tapscript). Script-path spends must use `TapSighashType::All`, not `Default`.
 
 Bonds: JKC locked in a documented vault template. No indexer token. Fees: optional extra output in the same user tx; Phase 1 fee may be 0.
 
@@ -201,7 +201,7 @@ Bonds: JKC locked in a documented vault template. No indexer token. Fees: option
 **Known violations (must be fixed):**
 - `runtime.rs` — `host_verify_groth16` is now feature-gated behind `experimental-zk` (fixed).
 - `zk.rs` — mock proofs are now behind `#[cfg(test)]` and the module is feature-gated (fixed).
-- `covenants.rs` — OP_CAT functions now behind `feature = "experimental-scripts"` (fixed).
+- `covenants.rs` — OP_CAT covenant code deleted entirely (Issue 14). `verify_equivocation_proof` moved to `attestation.rs`.
 
 ## Docs policy
 

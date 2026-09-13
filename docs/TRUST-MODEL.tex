@@ -100,7 +100,7 @@ Empirically verified against JKC testnet at block 177{,}269 via \texttt{getblock
     \item \textbf{SegWit (BIP-141) is ACTIVE} (height 140{,}000). P2WPKH and P2WSH supported. Witness discount applies.
     \item \textbf{CSV (BIP-68) is ACTIVE} (height 120{,}000). Relative timelocks for exits and unbond delays.
     \item \textbf{CLTV (BIP-65) is ACTIVE on mainnet, NOT on testnet} (testnet bip65 height = 99{,}999{,}999). Testnet scripts use CSV only. Mainnet scripts may use CLTV for absolute timelocks.
-    \item \textbf{OP\_CAT is ACTIVE on testnet} (confirmed by developer). Covenants using OP\_CAT are behind \texttt{feature = "experimental-scripts"}. Hash comparison can also use \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal fallback).
+    \item \textbf{OP\_CAT is ACTIVE on testnet} (confirmed by developer). Not used in live bonding scripts — OP\_CAT covenant code was deleted in Issue 14. Hash comparison uses \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal, no OP\_CAT dependency).
     \item \textbf{OP\_CHECKSIGADD} is active (Tapscript). Replaces OP\_CHECKMULTISIG in Tapscript.
     \item \textbf{OP\_SHA256, OP\_HASH160, OP\_HASH256} are active. Hash operations for commitments.
     \item \textbf{Schnorr signatures (BIP-340) are ACTIVE.} Used in Tapscript for operator attestation.
@@ -192,7 +192,7 @@ Operator $\mathcal{O}_i$ locks $b_i$ JKC into a P2TR vault script $\mathcal{V}_i
     \text{taproot\_output} = \text{taproot\_tweak}(operator\_key, script\_tree)
 \]
 
-\textbf{Script path:} Challenger can spend with equivocation proof. Hash comparison uses \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal) or \texttt{OP\_CAT} (testnet active, behind \texttt{experimental-scripts}).
+\textbf{Script path:} Challenger can spend with equivocation proof. Hash comparison uses \texttt{OP\_EQUAL}/\texttt{OP\_EQUALVERIFY} (universal, no OP\_CAT dependency).
 
 The vault script tree:
 \begin{lstlisting}[style=script]

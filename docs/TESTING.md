@@ -15,9 +15,6 @@
 # Full workspace (all crates, all default tests)
 cargo test --workspace
 
-# With experimental-scripts feature (OP_CAT covenants)
-cargo test --workspace --features experimental-scripts
-
 # With experimental-zk feature (mock ZK proofs, test-only)
 cargo test --workspace --features experimental-zk
 
@@ -72,7 +69,6 @@ cargo run -p utxo-vmd -- \
 | `packages/node/src/consensus/challenge.rs` (inline) | 6 | Challenge tx construction: proof validation, watcher threshold, evidence output, tx serialization, bond/fee checks |
 | `packages/node/src/consensus/l1_scripts.rs` (inline) | 14 | Script builders: vault tree, challenge leaf (BIP-342), operator unbond leaf, silence escape, softfork status, tagged hashes, push encoding |
 | `packages/node/src/consensus/attestation.rs` (inline) | 4 | Attestation signing, verification, equivocation detection, fail-closed on no validators |
-| `packages/node/src/consensus/covenants.rs` (inline) | 2 | Staking script, slashing script (experimental-scripts feature) |
 | `packages/node/src/consensus/fee_distribution.rs` (inline) | 5 | Fee calculation, indexer fee, operator shares, challenged operator, summary |
 | `packages/node/tests/consensus_tests.rs` | 2 | End-to-end consensus: attestation + equivocation |
 | `packages/node/tests/processor_tests.rs` | 3 | Block processor: envelope parsing, state transitions, reorg handling |
@@ -143,7 +139,7 @@ Tests in `packages/core-vm/tests/runtime_tests.rs`:
 | Test | What It Verifies |
 |:--|:--|
 | `test_build_vault_script_tree_model_b` | Vault tree: operator leaf + challenge leaf, tagged hashes |
-| `test_build_committee_challenge_leaf` | BIP-342: individual CHECKSIG (not CHECKMULTISIG), x-only pubkeys |
+| `test_build_committee_challenge_leaf` | BIP-342: OP_CHECKSIG + OP_CHECKSIGADD (not CHECKMULTISIG), x-only pubkeys, reversed witness stack |
 | `test_build_operator_unbond_leaf` | CSV + CHECKSIG, no CLTV |
 | `test_build_challenge_claim_script_tree` | Claim leaf (CSV) + rebut leaf (immediate) |
 | `test_build_silence_escape_script` | CSV + CHECKSIG escape path |
@@ -239,7 +235,8 @@ Live testing on JKC testnet revealed three BIP-342 compliance issues in `l1_scri
 
 | Issue | Root Cause | Fix |
 |:--|:--|:--|
-| `OP_CHECKMULTISIG` in tapscript | BIP-342 disables CHECKMULTISIG in tapscript | Replaced with individual `OP_CHECKSIG` + `OP_ADD` + `OP_EQUAL` for M-of-N threshold |
+| `OP_CHECKMULTISIG` in tapscript | BIP-342 disables CHECKMULTISIG in tapscript | Replaced with individual `OP_CHECKSIG` + `OP_CHECKSIGADD` (0xba) for M-of-N threshold |
+| Multi-watcher stack collision | Consecutive CHECKSIG popped previous boolean result instead of next sig | Standard BIP-342 `pk1 CHECKSIG pk2 CHECKSIGADD ... threshold EQUAL` + reversed witness order |
 | 33-byte compressed pubkeys | BIP-342 tapscript CHECKSIG expects 32-byte x-only pubkeys | Strip parity prefix: `pubkey[1..]` (32 bytes) |
 | `TapSighashType::Default` for script-path | Default (0x00) is for key-path; script-path needs explicit type | Use `TapSighashType::All` (0x01) for script-path spends |
 
@@ -257,7 +254,6 @@ These fixes are in `packages/node/src/consensus/l1_scripts.rs` and are covered b
 | Live testnet (ignored) | 7 files | 24 | ✅ All pass |
 | **Total** | **20** | **84** | **0 failed** |
 
-With `--features experimental-scripts`: +3 covenant tests (54 total node lib tests).
 With `--features experimental-zk`: mock ZK tests (test-only).
 
 ---
@@ -271,10 +267,11 @@ With `--features experimental-zk`: mock ZK tests (test-only).
 5. **Equivocation detection**: Same validator, same height, different roots → slashing proof
 6. **Equivocation proof verification**: Cryptographic signature verification on both attestations
 7. **Fail-closed**: No registered validators → attestation rejected
-8. **BIP-342 compliance**: No `OP_CHECKMULTISIG` in tapscript leaves; x-only pubkeys only
+8. **BIP-342 compliance**: No `OP_CHECKMULTISIG` in tapscript leaves; x-only pubkeys only; `OP_CHECKSIGADD` for M-of-N
 9. **No CLTV on testnet**: All timelocks use CSV (BIP-68), not CLTV (BIP-65)
-10. **No OP_CAT in default bonding scripts**: OP_CAT only behind `experimental-scripts` feature
+10. **No OP_CAT in bonding scripts**: OP_CAT covenant code deleted (Issue 14); live bonding scripts never used OP_CAT
 11. **Challenge slash works on testnet**: P2TR script-path spend with Schnorr signature confirmed on JKC testnet
+12. **Reorg rollback safety**: Scanner daemon detects block hash mismatches against L1 tip and rolls back uncommitted mutations to common ancestor via `rollback_to_block`
 
 ---
 

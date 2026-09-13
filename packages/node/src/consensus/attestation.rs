@@ -397,6 +397,72 @@ impl ConsensusManager {
     }
 }
 
+/// Verify an EquivocationProof mathematically:
+/// Confirms that both attestations are signed by the same validator, for the same chain and height,
+/// but with different State Roots.
+///
+/// Issue 14: Moved from covenants.rs (deleted) to attestation.rs, since this
+/// is attestation verification logic, not covenant/script logic.
+pub fn verify_equivocation_proof(proof: &EquivocationProof) -> bool {
+    // 1. Must be the same validator pubkey
+    if proof.first_attestation.validator_pubkey != proof.validator_pubkey
+        || proof.second_attestation.validator_pubkey != proof.validator_pubkey
+    {
+        return false;
+    }
+
+    // 2. Must be the same chain and block height
+    if proof.first_attestation.chain != proof.chain
+        || proof.second_attestation.chain != proof.chain
+        || proof.first_attestation.block_height != proof.block_height
+        || proof.second_attestation.block_height != proof.block_height
+    {
+        return false;
+    }
+
+    // 3. State roots MUST differ (the essence of double-signing / fraud)
+    if proof.first_attestation.state_root == proof.second_attestation.state_root {
+        return false;
+    }
+
+    // 4. Both signatures must be cryptographically valid
+    let secp = secp256k1::Secp256k1::new();
+    let pubkey_bytes = match hex::decode(&proof.validator_pubkey) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let pubkey = match secp256k1::PublicKey::from_slice(&pubkey_bytes) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+
+    let verify_single = |att: &crate::types::StateAttestation| -> bool {
+        let sig_bytes = match hex::decode(&att.signature_hex) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let sig = match secp256k1::ecdsa::Signature::from_compact(&sig_bytes) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        let digest = ConsensusManager::hash_attestation_payload(
+            &att.chain,
+            att.block_height,
+            &att.block_hash,
+            &att.state_root,
+        );
+
+        let msg = match secp256k1::Message::from_digest_slice(&digest) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        secp.verify_ecdsa(&msg, &sig, &pubkey).is_ok()
+    };
+
+    verify_single(&proof.first_attestation) && verify_single(&proof.second_attestation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,7 +517,7 @@ mod tests {
         assert_eq!(proof.second_attestation.state_root, "root_malicious_fork");
 
         // Verify cryptographic validity of the proof
-        assert!(crate::consensus::covenants::verify_equivocation_proof(proof));
+        assert!(verify_equivocation_proof(proof));
     }
 
     #[test]

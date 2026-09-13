@@ -7,7 +7,6 @@ license = "MIT"
 
 [features]
 default = []
-experimental-scripts = []
 
 [dependencies]
 utxo-core-vm = { path = "../core-vm" }

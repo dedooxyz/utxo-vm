@@ -10,8 +10,8 @@
 //!
 //! All timelocks use OP_CHECKSEQUENCEVERIFY (CSV, active at height 120,000).
 //! CLTV is available on mainnet but NOT on testnet — use CSV for testnet scripts.
-//! OP_CAT is active on testnet — covenants.rs uses OP_CAT behind `experimental-scripts`.
-//! Hash comparison can use OP_EQUAL/OP_EQUALVERIFY (universal) or OP_CAT (testnet+).
+//! Hash comparison uses OP_EQUAL/OP_EQUALVERIFY (universal, no OP_CAT dependency).
+//! (Issue 14: covenants.rs OP_CAT code deleted; live bonding scripts never used OP_CAT.)
 //!
 //! Challenge model: Model B (committee-gated). See build_vault_script_tree docs.
 
@@ -31,6 +31,7 @@ pub const OP_EQUAL: u8 = 0x87;
 pub const OP_CHECKSIG: u8 = 0xac;
 pub const OP_CHECKSIGVERIFY: u8 = 0xad;
 pub const OP_CHECKMULTISIG: u8 = 0xae;
+pub const OP_CHECKSIGADD: u8 = 0xba;
 pub const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
 pub const OP_SHA256: u8 = 0xa8;
 pub const OP_RETURN: u8 = 0x6a;
@@ -189,6 +190,7 @@ pub fn build_vault_script_tree(config: &VaultConfig) -> Result<VaultScriptTree> 
         challenge_leaf,
         operator_pubkey: config.operator_pubkey.clone(),
         challenger_pubkey: config.challenger_pubkey.clone(),
+        num_watchers: config.watcher_pubkeys.len(),
     })
 }
 
@@ -220,13 +222,18 @@ fn build_operator_unbond_leaf(
 
 /// Build the committee challenge leaf script (Model B).
 ///
-/// BIP-342 disables OP_CHECKMULTISIG in tapscript. We use individual
-/// OP_CHECKSIG with an on-stack threshold counter instead.
+/// BIP-342 disables OP_CHECKMULTISIG in tapscript. We use the standard
+/// BIP-342 multisig pattern with individual OP_CHECKSIG and OP_CHECKSIGADD (0xba).
 ///
-/// Script: <pubkey1> OP_CHECKSIG <pubkey2> OP_CHECKSIG ... OP_<M> OP_EQUAL
+/// Pattern for N=1:
+///   <pubkey1> OP_CHECKSIG
 ///
-/// Each CHECKSIG pushes 1/0 to the stack. After all checks, the sum must
-/// equal M (the threshold). This is the BIP-342-compatible M-of-N pattern.
+/// Pattern for N>1:
+///   <pubkey1> OP_CHECKSIG <pubkey2> OP_CHECKSIGADD ... <pubkeyN> OP_CHECKSIGADD <threshold> OP_EQUAL
+///
+/// Under BIP-342, CHECKSIGADD pops (pubkey, num, sig). If sig is valid,
+/// it pushes num + 1. If sig is empty, it pushes num. If sig is invalid,
+/// execution traps.
 ///
 /// The watcher committee (M-of-N) can spend the bond to a challenge UTXO.
 /// No timelock — the committee can challenge at any time. Security comes
@@ -243,36 +250,34 @@ fn build_committee_challenge_leaf(
         return Err(anyhow!("Threshold M cannot exceed N"));
     }
 
-    let mut script = Vec::new();
-
-    // For each watcher: push x-only pubkey (32 bytes), OP_CHECKSIG
-    // BIP-342 tapscript uses x-only pubkeys (32 bytes), not compressed (33 bytes)
-    for pk in watcher_pubkeys {
+    for (i, pk) in watcher_pubkeys.iter().enumerate() {
         if pk.len() != 33 {
-            return Err(anyhow!("Watcher pubkey must be 33 bytes (compressed)"));
+            return Err(anyhow!("Watcher pubkey {} must be 33 bytes (compressed)", i));
         }
-        // Strip the parity prefix byte for x-only pubkey
-        script.push(32); // push 32 bytes
-        script.extend_from_slice(&pk[1..]);
-        script.push(OP_CHECKSIG);
     }
 
-    // Sum all CHECKSIG results: add them together
-    // After N CHECKSIGs, stack has N values (0 or 1 each)
-    // We need to sum them and compare to M
+    let mut script = Vec::new();
+
     if watcher_pubkeys.len() == 1 {
-        // Single watcher: just check the result is 1 (threshold must be 1)
-        // The CHECKSIG already left 1/0 on stack, just verify it's truthy
-        // No extra opcodes needed — the stack top is the result
+        // Single watcher: push x-only pubkey (32 bytes), OP_CHECKSIG
+        // Evaluation leaves 1 on stack if valid (threshold must be 1)
+        script.push(32);
+        script.extend_from_slice(&watcher_pubkeys[0][1..]);
+        script.push(OP_CHECKSIG);
     } else {
-        // Multiple watchers: sum the results
-        // Stack: r1 r2 r3 ... rN
-        // We need: r1 + r2 + ... + rN == M
-        // Use OP_ADD to accumulate, then OP_EQUAL to M
-        for _ in 1..watcher_pubkeys.len() {
-            script.push(OP_ADD);
+        // First watcher: push x-only pubkey (32 bytes), OP_CHECKSIG (leaves 1 on stack)
+        script.push(32);
+        script.extend_from_slice(&watcher_pubkeys[0][1..]);
+        script.push(OP_CHECKSIG);
+
+        // Subsequent watchers: push x-only pubkey (32 bytes), OP_CHECKSIGADD (accumulates count)
+        for pk in &watcher_pubkeys[1..] {
+            script.push(32);
+            script.extend_from_slice(&pk[1..]);
+            script.push(OP_CHECKSIGADD);
         }
-        // Push M (threshold) and compare
+
+        // Push M (threshold) and compare with accumulated signature count
         push_minimal_uint(&mut script, threshold as u64);
         script.push(OP_EQUAL);
     }
@@ -287,6 +292,7 @@ pub struct VaultScriptTree {
     pub challenge_leaf: Vec<u8>,
     pub operator_pubkey: Vec<u8>,
     pub challenger_pubkey: Vec<u8>,
+    pub num_watchers: usize,
 }
 
 impl VaultScriptTree {
@@ -376,13 +382,30 @@ impl VaultScriptTree {
     }
 
     /// Get the witness items needed for individual CHECKSIG spending (committee challenge leaf).
-    /// BIP-342 uses individual OP_CHECKSIG, not OP_CHECKMULTISIG.
-    /// Returns: [sig1, sig2, ..., sigM, script]
-    /// (No dummy element needed — that was only for CHECKMULTISIG)
+    /// BIP-342 uses individual OP_CHECKSIG + OP_CHECKSIGADD, not OP_CHECKMULTISIG.
+    ///
+    /// Under BIP-342, every public key in the script evaluates either a valid signature
+    /// (incrementing the accumulator) or an empty byte vector `vec![]` (leaving the
+    /// accumulator unchanged). To prevent stack underflow, the witness must contain
+    /// exactly N signature items (one per watcher).
+    ///
+    /// If fewer than N signatures are provided (e.g. only M signatures meeting threshold),
+    /// this function pads the remaining non-signing watcher slots with empty byte vectors `vec![]`.
+    ///
+    /// Bitcoin witness stack order: items pushed first sit at the bottom of the stack.
+    /// During BIP-342 execution, the first opcode (CHECKSIG for pk1) pops the top of the stack.
+    /// Reversing the N signatures ensures signatures[0] (for pk1) sits at the top of the stack.
+    ///
+    /// Returns: [sigN, ..., sig2, sig1, script]
     pub fn committee_witness_template(&self, signatures: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        let mut witness = Vec::with_capacity(signatures.len() + 1);
-        // Signatures in the order they appear in the script
-        for sig in signatures {
+        let mut padded_sigs = signatures.to_vec();
+        // Pad with empty byte vectors for non-signing watchers up to num_watchers
+        while padded_sigs.len() < self.num_watchers {
+            padded_sigs.push(Vec::new());
+        }
+
+        let mut witness = Vec::with_capacity(padded_sigs.len() + 1);
+        for sig in padded_sigs.iter().rev() {
             witness.push(sig.clone());
         }
         // The script leaf itself (for script-path spend)
@@ -928,13 +951,24 @@ mod tests {
 
     #[test]
     fn test_build_committee_challenge_leaf() {
+        // Test N=1 (single watcher)
+        let single_watcher = vec![vec![0x02; 33]];
+        let single_script = build_committee_challenge_leaf(&single_watcher, 1).unwrap();
+        assert!(single_script.contains(&OP_CHECKSIG));
+        assert!(!single_script.contains(&OP_CHECKSIGADD), "Single watcher should NOT use CHECKSIGADD");
+        assert!(!single_script.contains(&OP_CHECKMULTISIG), "Must NOT contain CHECKMULTISIG");
+
+        // Test N=3, M=2 (multi-watcher committee with OP_CHECKSIGADD)
         let watchers = vec![vec![0x04; 33], vec![0x05; 33], vec![0x06; 33]];
         let script = build_committee_challenge_leaf(&watchers, 2)
             .expect("Failed to build committee challenge leaf");
 
-        // BIP-342: tapscript uses individual OP_CHECKSIG, not OP_CHECKMULTISIG
-        assert!(script.contains(&OP_CHECKSIG));
+        // BIP-342: tapscript uses OP_CHECKSIG + OP_CHECKSIGADD, not OP_CHECKMULTISIG
+        assert!(script.contains(&OP_CHECKSIG), "Must contain OP_CHECKSIG for first watcher");
+        assert!(script.contains(&OP_CHECKSIGADD), "Must contain OP_CHECKSIGADD for subsequent watchers");
+        assert!(script.contains(&OP_EQUAL), "Must contain OP_EQUAL for threshold check");
         assert!(!script.contains(&OP_CHECKMULTISIG), "Must NOT contain CHECKMULTISIG (BIP-342)");
+
         // Must contain x-only pubkeys (32 bytes, stripped from 33-byte compressed)
         for pk in &watchers {
             assert!(script.windows(32).any(|w| w == &pk[1..]),
@@ -943,6 +977,34 @@ mod tests {
         // Must NOT contain OP_CAT or CLTV
         assert!(!script.contains(&0x7e), "Challenge leaf must NOT contain OP_CAT");
         assert!(!script.contains(&0xb1), "Challenge leaf must NOT contain CLTV");
+
+        // Test witness template ordering and padding (reversed for stack top)
+        let config = VaultConfig {
+            operator_pubkey: vec![0x02; 33],
+            challenger_pubkey: vec![0x03; 33],
+            unbond_delay: 144,
+            claim_delay: 10,
+            watcher_pubkeys: watchers.clone(),
+            watcher_threshold: 2,
+        };
+        let tree = build_vault_script_tree(&config).unwrap();
+
+        // 1. M=2 signatures provided for N=3 watchers: slot 3 must be padded with empty vector
+        let sigs_m = vec![vec![1; 64], vec![2; 64]];
+        let witness_m = tree.committee_witness_template(&sigs_m);
+        assert_eq!(witness_m.len(), 4, "Must contain 3 sig items + 1 script leaf");
+        assert_eq!(witness_m[0], Vec::<u8>::new(), "Non-signing watcher 3 must have empty vector");
+        assert_eq!(witness_m[1], vec![2; 64], "Watcher 2 signature");
+        assert_eq!(witness_m[2], vec![1; 64], "Watcher 1 signature (stack top)");
+        assert_eq!(witness_m[3], tree.challenge_leaf);
+
+        // 2. All N=3 signatures provided
+        let sigs_all = vec![vec![1; 64], vec![2; 64], vec![3; 64]];
+        let witness_all = tree.committee_witness_template(&sigs_all);
+        assert_eq!(witness_all[0], vec![3; 64]);
+        assert_eq!(witness_all[1], vec![2; 64]);
+        assert_eq!(witness_all[2], vec![1; 64]);
+        assert_eq!(witness_all[3], tree.challenge_leaf);
     }
 
     #[test]

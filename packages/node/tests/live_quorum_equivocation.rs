@@ -17,8 +17,7 @@ use bitcoin::Sequence;
 use reqwest::Client as HttpClient;
 use sha2::{Digest, Sha256};
 
-use utxo_vmd::consensus::attestation::ConsensusManager;
-use utxo_vmd::consensus::covenants;
+use utxo_vmd::consensus::attestation::{self, ConsensusManager};
 use utxo_vmd::consensus::challenge;
 use utxo_vmd::consensus::l1_scripts;
 
@@ -258,7 +257,7 @@ async fn live_equivocation_double_sign_on_chain() {
     println!("[LIVE]   Second root: {}", proof.second_attestation.state_root);
 
     // Verify the proof cryptographically
-    assert!(covenants::verify_equivocation_proof(proof), "Proof must verify");
+    assert!(attestation::verify_equivocation_proof(proof), "Proof must verify");
     println!("[LIVE] Equivocation proof cryptographically verified: OK");
 
     // Post both conflicting attestations on-chain (this is what a real operator would do)
