@@ -2,6 +2,32 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+/// Validate that `s` is a well-formed hex string of exactly `expected_len` bytes
+/// (i.e. `expected_len * 2` hex chars). Returns `Err` if the value contains
+/// non-hex characters, is the wrong length, or could alter the URL path (e.g.
+/// contains `/`, `..`, or other path-altering characters — which hex never does,
+/// so the all-hex check is sufficient).
+///
+/// This guards every method that interpolates a hash-shaped parameter into a
+/// URL path, preventing path-traversal against the trusted electrs backend.
+fn validate_hex_hash(s: &str, expected_len: usize) -> Result<()> {
+    let expected_hex_len = expected_len * 2;
+    if s.len() != expected_hex_len {
+        return Err(anyhow::anyhow!(
+            "invalid hash: expected {} hex chars ({} bytes), got {} chars",
+            expected_hex_len,
+            expected_len,
+            s.len()
+        ));
+    }
+    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow::anyhow!(
+            "invalid hash: contains non-hex characters (path traversal guard)"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElectrsTxInput {
     pub txid: String,
@@ -64,6 +90,7 @@ impl ElectrsClient {
     }
 
     pub async fn get_block_txs(&self, block_hash: &str) -> Result<Vec<ElectrsTx>> {
+        validate_hex_hash(block_hash, 32).context("block_hash")?;
         let url = format!("{}/block/{}/txs", self.base_url, block_hash);
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let txs = resp.json::<Vec<ElectrsTx>>().await?;
@@ -78,6 +105,7 @@ impl ElectrsClient {
     }
 
     pub async fn get_tx(&self, txid: &str) -> Result<ElectrsTx> {
+        validate_hex_hash(txid, 32).context("txid")?;
         let url = format!("{}/tx/{}", self.base_url, txid);
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let tx = resp.json::<ElectrsTx>().await?;
