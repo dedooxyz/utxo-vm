@@ -262,7 +262,7 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn rollback_to_block(&mut self, chain: &str, target_height: u64) -> Result<usize> {
+    pub fn rollback_to_block(&self, chain: &str, target_height: u64) -> Result<usize> {
         let mut rolled_back = 0;
         let write_txn = self.db.begin_write()?;
         {
@@ -273,62 +273,80 @@ impl StateStore {
             let mut transitions_table = write_txn.open_table(TRANSITIONS_TABLE)?;
             let mut chain_meta_table = write_txn.open_table(CHAIN_META_TABLE)?;
 
-            let mut to_delete_ids = Vec::new();
-            let mut stale_block_heights = Vec::new();
+            // Collect undo logs above target_height, then process in DESCENDING
+            // block height order. This is critical for correctness: if we process
+            // in ascending order, an earlier block's undo log restores the object
+            // to a previous state, then a later block's undo log overwrites it
+            // with an intermediate state — losing the rollback. Descending order
+            // ensures we undo the most recent change first, then earlier ones,
+            // so each undo restores the state that the next (older) undo expects.
+            let mut undo_logs: Vec<(u64, UndoLogRecord)> = Vec::new();
             for item in undo_table.iter()? {
                 let (id_acc, val_acc) = item?;
                 let log: UndoLogRecord = serde_json::from_slice(val_acc.value())?;
                 if log.chain == chain && log.block_height > target_height {
-                    to_delete_ids.push(id_acc.value());
-                    stale_block_heights.push(log.block_height);
+                    undo_logs.push((id_acc.value(), log));
+                }
+            }
+            undo_logs.sort_by(|a, b| b.1.block_height.cmp(&a.1.block_height));
 
-                    if log.action == "CREATE" {
-                        // Undo create means delete object & remove its seal
-                        if let Some(obj_val) = obj_table.get(log.object_id.as_str())? {
-                            if let Ok(existing) = serde_json::from_slice::<SmartObjectRecord>(obj_val.value()) {
-                                seals_table.remove(existing.seal.as_str())?;
-                            }
-                        }
-                        obj_table.remove(log.object_id.as_str())?;
-                    } else if log.action == "UPDATE" {
-                        // Remove newer seal
-                        if let Some(obj_val) = obj_table.get(log.object_id.as_str())? {
-                            if let Ok(existing) = serde_json::from_slice::<SmartObjectRecord>(obj_val.value()) {
-                                seals_table.remove(existing.seal.as_str())?;
-                            }
-                        }
-                        // Restore previous state — preserve created_at_block
-                        if let (Some(code_hash), Some(seal), Some(sats), Some(owner), Some(state)) = (
-                            log.prev_code_hash,
-                            log.prev_seal,
-                            log.prev_satoshis,
-                            log.prev_owner,
-                            log.prev_state_data,
-                        ) {
-                            let prev_obj = SmartObjectRecord {
-                                object_id: log.object_id.clone(),
-                                code_hash,
-                                seal: seal.clone(),
-                                satoshis: sats,
-                                owner,
-                                state_data: state,
-                                created_at_block: log.prev_created_at_block.unwrap_or(0),
-                                updated_at_block: log.prev_updated_at_block.unwrap_or(target_height),
-                            };
-                            let ser = serde_json::to_vec(&prev_obj)?;
-                            obj_table.insert(log.object_id.as_str(), ser.as_slice())?;
-                            seals_table.insert(seal.as_str(), log.object_id.as_str())?;
+            let mut to_delete_ids = Vec::new();
+            for (id, log) in undo_logs {
+                to_delete_ids.push(id);
+
+                if log.action == "CREATE" {
+                    // Undo create means delete object & remove its seal
+                    if let Some(obj_val) = obj_table.get(log.object_id.as_str())? {
+                        if let Ok(existing) = serde_json::from_slice::<SmartObjectRecord>(obj_val.value()) {
+                            seals_table.remove(existing.seal.as_str())?;
                         }
                     }
-                    rolled_back += 1;
+                    obj_table.remove(log.object_id.as_str())?;
+                } else if log.action == "UPDATE" {
+                    // Remove newer seal
+                    if let Some(obj_val) = obj_table.get(log.object_id.as_str())? {
+                        if let Ok(existing) = serde_json::from_slice::<SmartObjectRecord>(obj_val.value()) {
+                            seals_table.remove(existing.seal.as_str())?;
+                        }
+                    }
+                    // Restore previous state — preserve created_at_block
+                    if let (Some(code_hash), Some(seal), Some(sats), Some(owner), Some(state)) = (
+                        log.prev_code_hash,
+                        log.prev_seal,
+                        log.prev_satoshis,
+                        log.prev_owner,
+                        log.prev_state_data,
+                    ) {
+                        let prev_obj = SmartObjectRecord {
+                            object_id: log.object_id.clone(),
+                            code_hash,
+                            seal: seal.clone(),
+                            satoshis: sats,
+                            owner,
+                            state_data: state,
+                            created_at_block: log.prev_created_at_block.unwrap_or(0),
+                            updated_at_block: log.prev_updated_at_block.unwrap_or(target_height),
+                        };
+                        let ser = serde_json::to_vec(&prev_obj)?;
+                        obj_table.insert(log.object_id.as_str(), ser.as_slice())?;
+                        seals_table.insert(seal.as_str(), log.object_id.as_str())?;
+                    }
                 }
+                rolled_back += 1;
             }
 
             for id in to_delete_ids {
                 undo_table.remove(id)?;
             }
 
-            // Delete stale block records (blocks above target_height)
+            // Delete stale block records (all blocks above target_height)
+            let mut stale_block_heights = Vec::new();
+            for item in blocks_table.iter()? {
+                let (h_acc, _) = item?;
+                if h_acc.value() > target_height {
+                    stale_block_heights.push(h_acc.value());
+                }
+            }
             for h in stale_block_heights {
                 let _ = blocks_table.remove(h);
             }
