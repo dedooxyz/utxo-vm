@@ -162,7 +162,32 @@ async function runTests() {
     console.log("  ✓ Test 3 passed");
   }
 
-  console.log("All Issue 2 unit tests passed successfully!");
+  // Test 4 (Issue 3): SOT serializes both localSupply and totalSupply
+  {
+    console.log("  Test 4 (Issue 3): SOT localSupply field and serialization");
+    const initRes = callInit(JSON.stringify({
+      type: "SOT",
+      name: "LocalSupplyToken",
+      symbol: "LST",
+      decimals: 8,
+      localSupply: "250000",
+      totalSupply: "250000",
+      balance: 250000,
+      owner: "03deadbeef",
+    }));
+    assert.strictEqual(initRes, 0, "Init with localSupply must succeed");
+    const state = JSON.parse(getState());
+    assert.strictEqual(state.localSupply, "250000", "State must include localSupply");
+
+    const callRes = callMethod("transfer", JSON.stringify({ to: "03deadbeef", amount: 250000 }));
+    assert.strictEqual(callRes, 0, "Transfer must succeed with localSupply token");
+    const transferredState = JSON.parse(getState());
+    assert.strictEqual(transferredState.localSupply, "250000", "State after transfer must retain localSupply");
+    assert.strictEqual(transferredState.totalSupply, "250000", "State after transfer must retain totalSupply alias");
+    console.log("  ✓ Test 4 passed");
+  }
+
+  console.log("All unit tests passed successfully!");
 }
 
 runTests().catch((err) => {

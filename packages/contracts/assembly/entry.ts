@@ -118,7 +118,7 @@ function callSOT(method: string, state: JsonValue, args: JsonValue): i32 {
   let name = state.getString("name");
   let symbol = state.getString("symbol");
   let decimals = <u8>state.getInt("decimals");
-  let totalSupply = <u64>state.getInt("totalSupply");
+  let totalSupply = state.has("localSupply") ? <u64>state.getInt("localSupply") : <u64>state.getInt("totalSupply");
   let balance = <u64>state.getInt("balance");
   let owner = state.getString("owner");
 
