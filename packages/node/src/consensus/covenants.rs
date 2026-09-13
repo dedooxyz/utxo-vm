@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use sha2::{Digest, Sha256};
 use crate::types::EquivocationProof;
 
 // Standard opcodes — always available
@@ -216,13 +215,12 @@ pub fn verify_equivocation_proof(proof: &EquivocationProof) -> bool {
             Err(_) => return false,
         };
 
-        let mut hasher = Sha256::new();
-        hasher.update(b"UTXO_VM_ATTESTATION");
-        hasher.update(att.chain.as_bytes());
-        hasher.update(&att.block_height.to_be_bytes());
-        hasher.update(att.block_hash.as_bytes());
-        hasher.update(att.state_root.as_bytes());
-        let digest = hasher.finalize();
+        let digest = crate::consensus::attestation::ConsensusManager::hash_attestation_payload(
+            &att.chain,
+            att.block_height,
+            &att.block_hash,
+            &att.state_root,
+        );
 
         let msg = match secp256k1::Message::from_digest_slice(&digest) {
             Ok(m) => m,

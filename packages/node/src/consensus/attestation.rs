@@ -104,9 +104,12 @@ impl ConsensusManager {
     pub fn hash_attestation_payload(chain: &str, height: u64, block_hash: &str, state_root: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"UTXO_VM_ATTESTATION");
+        hasher.update(&(chain.len() as u32).to_be_bytes());
         hasher.update(chain.as_bytes());
         hasher.update(&height.to_be_bytes());
+        hasher.update(&(block_hash.len() as u32).to_be_bytes());
         hasher.update(block_hash.as_bytes());
+        hasher.update(&(state_root.len() as u32).to_be_bytes());
         hasher.update(state_root.as_bytes());
         let res = hasher.finalize();
         let mut out = [0u8; 32];
@@ -575,4 +578,22 @@ mod tests {
         assert_eq!(q1.merkle_root, q2.merkle_root,
             "Merkle root must be deterministic regardless of attestation insertion order");
     }
+
+    #[test]
+    fn test_hash_attestation_payload_collision_resistance() {
+        // Without length-prefixing, shifting field boundaries between adjacent
+        // string fields produces identical hashes. For example:
+        // Case 1: block_hash = "AABB", state_root = "CC"
+        // Case 2: block_hash = "AAB", state_root = "BCC"
+        // Both concatenated: "AABBCC"
+        let h1 = ConsensusManager::hash_attestation_payload("JKC", 100, "AABB", "CC");
+        let h2 = ConsensusManager::hash_attestation_payload("JKC", 100, "AAB", "BCC");
+        assert_ne!(h1, h2, "Adjacent field boundary shifts must produce different hashes");
+
+        // Different chain names must also produce distinct hashes
+        let h3 = ConsensusManager::hash_attestation_payload("JKC", 100, "0011", "2233");
+        let h4 = ConsensusManager::hash_attestation_payload("JK", 100, "0011", "2233");
+        assert_ne!(h3, h4, "Different chain names must produce different hashes");
+    }
 }
+
