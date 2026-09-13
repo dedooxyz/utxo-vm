@@ -115,6 +115,35 @@ fn empty_hash_at_level(empty_hashes: &[[u8; 32]], level: usize) -> [u8; 32] {
 }
 
 impl SparseMerkleTree {
+    /// Get the sibling hash at level `bit_idx + 1` from root, for the path
+    /// through `key`.
+    ///
+    /// At the leaf level (bit_idx == TREE_DEPTH - 1), the sibling is a LEAF
+    /// stored in `self.leaves`, not an internal node in `self.nodes`. This
+    /// is critical: if we only looked in `self.nodes`, the sibling would
+    /// always be the empty leaf hash, even when the sibling leaf exists.
+    /// This would cause the parent hash to be wrong whenever two sibling
+    /// leaves both have values, making the root insertion-order-dependent.
+    fn get_sibling_hash(&self, key: &[u8; 32], bit_idx: usize) -> [u8; 32] {
+        if bit_idx == TREE_DEPTH - 1 {
+            // Leaf level: sibling is a leaf. Look it up in self.leaves.
+            let mut sibling_key = *key;
+            flip_bit(&mut sibling_key, bit_idx);
+            match self.leaves.get(&sibling_key) {
+                Some(sibling_val) => hash_leaf(&sibling_key, sibling_val),
+                None => self.empty_hashes[0], // empty leaf
+            }
+        } else {
+            // Internal level: sibling is an internal node in self.nodes.
+            let mut sibling_prefix = path_prefix(key, bit_idx + 1);
+            flip_bit(&mut sibling_prefix, bit_idx);
+            self.nodes
+                .get(&((bit_idx + 1) as u16, sibling_prefix))
+                .copied()
+                .unwrap_or_else(|| empty_hash_at_level(&self.empty_hashes, bit_idx + 1))
+        }
+    }
+
     pub fn new() -> Self {
         let mut empty_hashes = Vec::with_capacity(TREE_DEPTH + 1);
         let mut current = [0u8; 32];
@@ -160,15 +189,7 @@ impl SparseMerkleTree {
             let bit = bit_at(&key, bit_idx);
 
             // Sibling at level bit_idx+1 from root.
-            // Sibling prefix = first (bit_idx+1) bits with bit bit_idx flipped.
-            let mut sibling_prefix = path_prefix(&key, bit_idx + 1);
-            flip_bit(&mut sibling_prefix, bit_idx);
-
-            let sibling_hash = self
-                .nodes
-                .get(&((bit_idx + 1) as u16, sibling_prefix))
-                .copied()
-                .unwrap_or_else(|| empty_hash_at_level(&self.empty_hashes, bit_idx + 1));
+            let sibling_hash = self.get_sibling_hash(&key, bit_idx);
 
             // Compute parent hash
             let (left, right) = if bit == 0 {
@@ -227,16 +248,7 @@ impl SparseMerkleTree {
         for bit_idx in (0..TREE_DEPTH).rev() {
             let bit = bit_at(key, bit_idx);
 
-            // Sibling at level bit_idx+1 from root.
-            // Sibling prefix = first (bit_idx+1) bits with bit bit_idx flipped.
-            let mut sibling_prefix = path_prefix(key, bit_idx + 1);
-            flip_bit(&mut sibling_prefix, bit_idx);
-
-            let sibling_hash = self
-                .nodes
-                .get(&((bit_idx + 1) as u16, sibling_prefix))
-                .copied()
-                .unwrap_or_else(|| empty_hash_at_level(&self.empty_hashes, bit_idx + 1));
+            let sibling_hash = self.get_sibling_hash(key, bit_idx);
 
             proof_path.push(SmtProofNode {
                 position: if bit == 0 { "right".to_string() } else { "left".to_string() },
@@ -266,14 +278,7 @@ impl SparseMerkleTree {
         for bit_idx in (0..TREE_DEPTH).rev() {
             let bit = bit_at(key, bit_idx);
 
-            let mut sibling_prefix = path_prefix(key, bit_idx + 1);
-            flip_bit(&mut sibling_prefix, bit_idx);
-
-            let sibling_hash = self
-                .nodes
-                .get(&((bit_idx + 1) as u16, sibling_prefix))
-                .copied()
-                .unwrap_or_else(|| empty_hash_at_level(&self.empty_hashes, bit_idx + 1));
+            let sibling_hash = self.get_sibling_hash(key, bit_idx);
 
             let (left, right) = if bit == 0 {
                 (current_hash, sibling_hash)
@@ -517,6 +522,78 @@ mod tests {
         // separators or tree structure change — that's intentional.
         assert_ne!(root, [0u8; 32], "Root must not be all zeros with leaves present");
         assert_ne!(root, smt.empty_hashes[TREE_DEPTH], "Root must differ from empty tree root");
+    }
+
+    #[test]
+    fn test_smt_sibling_leaves_at_leaf_level() {
+        // Deep-review regression: two keys that are siblings at the LEAF
+        // level (differ only in bit 255 = LSB) must produce an
+        // insertion-order-independent root. Before the fix, the leaf-level
+        // sibling was always looked up as an empty internal node, never as
+        // a leaf, so the parent hash was wrong whenever both sibling leaves
+        // had values — making the root depend on insertion order.
+        let key_a = [0u8; 32]; // bit 255 = 0
+        let mut key_b = [0u8; 32];
+        key_b[31] = 0x01; // bit 255 = 1
+        let val_a = [10u8; 32];
+        let val_b = [20u8; 32];
+
+        let mut tree1 = SparseMerkleTree::new();
+        tree1.update(key_a, val_a);
+        tree1.update(key_b, val_b);
+
+        let mut tree2 = SparseMerkleTree::new();
+        tree2.update(key_b, val_b);
+        tree2.update(key_a, val_a);
+
+        assert_eq!(
+            tree1.root(),
+            tree2.root(),
+            "Root must be order-independent even for sibling leaves"
+        );
+
+        // Also verify the proof for one sibling references the other's hash
+        let proof_a = tree1.get_proof(&key_a).expect("proof for key_a");
+        assert!(proof_a.verified, "proof for key_a must verify");
+        let proof_b = tree1.get_proof(&key_b).expect("proof for key_b");
+        assert!(proof_b.verified, "proof for key_b must verify");
+
+        // The first proof entry (leaf level) sibling must be the other leaf's hash
+        let sibling_leaf_hash = hash_leaf(&key_b, &val_b);
+        assert_eq!(
+            proof_a.proof_path[0].hash_hex,
+            hex::encode(sibling_leaf_hash),
+            "Leaf-level sibling in proof for key_a must be key_b's leaf hash"
+        );
+    }
+
+    #[test]
+    fn test_smt_many_sibling_pairs_order_independent() {
+        // Deep-review regression: multiple sibling-leaf pairs at different
+        // leaf-level positions must all produce order-independent roots.
+        let keys: Vec<([u8; 32], [u8; 32])> = (0..8u8)
+            .map(|i| {
+                let mut a = [0u8; 32];
+                let mut b = [0u8; 32];
+                a[31] = i * 2;
+                b[31] = i * 2 + 1;
+                (a, b)
+            })
+            .collect();
+
+        let mut tree1 = SparseMerkleTree::new();
+        for (a, b) in &keys {
+            tree1.update(*a, [1u8; 32]);
+            tree1.update(*b, [2u8; 32]);
+        }
+
+        let mut tree2 = SparseMerkleTree::new();
+        for (a, b) in keys.iter().rev() {
+            tree2.update(*b, [2u8; 32]);
+            tree2.update(*a, [1u8; 32]);
+        }
+
+        assert_eq!(tree1.root(), tree2.root(), "Root must be order-independent with many sibling pairs");
     }
 
     #[test]
