@@ -87,12 +87,14 @@ impl FeeDistribution {
         txid: &str,
         params: &FeeParams,
     ) -> Result<FeeEnvelope> {
-        // Use FeeParams for indexer fee calculation (overflow-safe)
+        // Compute indexer_fee once and derive operator_pool from it.
+        // This avoids the double computation that would occur if we called
+        // calculate_operator_pool(params, total_fee) which recomputes
+        // indexer_fee internally. The invariant indexer_fee + operator_pool
+        // == total_fee is guaranteed by calculate_indexer_fee capping at
+        // total_fee.
         let indexer_fee = calculate_indexer_fee(params, total_fee);
-        // Issue 15: Use the shared calculate_operator_pool helper instead of
-        // duplicating the subtraction, so there's only one implementation to
-        // keep correct.
-        let operator_pool = calculate_operator_pool(params, total_fee);
+        let operator_pool = total_fee.saturating_sub(indexer_fee);
 
         let envelope = FeeEnvelope {
             total_fee,
