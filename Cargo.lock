@@ -4426,6 +4426,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "utxo-core-vm",
  "wat",
 ]

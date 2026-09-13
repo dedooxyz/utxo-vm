@@ -37,6 +37,46 @@ fn validate_hex_hash(s: &str, expected_len: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validate the electrs URL scheme (Issue 23).
+///
+/// `https://` is always allowed. `http://` is allowed only for loopback hosts
+/// (127.0.0.1, ::1, localhost). A non-loopback `http://` URL is rejected
+/// because broadcast_tx sends raw signed transactions and get_tx/get_block_txs
+/// are the node's only source of chain data — an on-path attacker on a plain
+/// HTTP connection to a remote host could read broadcasts and tamper with
+/// responses.
+fn validate_url_scheme(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url)
+        .with_context(|| format!("parsing electrs URL: {}", url))?;
+
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = parsed.host_str().unwrap_or("");
+            let is_loopback = host == "127.0.0.1"
+                || host == "::1"
+                || host == "localhost"
+                || host == "[::1]";
+            if is_loopback {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "electrs URL uses plain http:// for non-loopback host '{}'. \
+                     Use https:// for any remote electrs instance — broadcast_tx sends \
+                     raw signed transactions and get_tx/get_block_txs are the node's \
+                     only source of chain data. An on-path attacker on plain HTTP \
+                     could read broadcasts and tamper with responses.",
+                    host
+                ))
+            }
+        }
+        other => Err(anyhow::anyhow!(
+            "electrs URL must use http:// or https://, got '{}://'",
+            other
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElectrsTxInput {
     pub txid: String,
@@ -58,7 +98,7 @@ pub struct ElectrsTx {
     pub vout: Vec<ElectrsTxOutput>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ElectrsClient {
     base_url: String,
     client: Client,
@@ -107,9 +147,25 @@ impl ElectrsClient {
 
     pub fn new(base_url: String) -> Self {
         Self::with_timeout(base_url, 15)
+            .unwrap_or_else(|e| {
+                panic!("ElectrsClient::new: {}", e);
+            })
     }
 
-    pub fn with_timeout(base_url: String, timeout_secs: u64) -> Self {
+    /// Construct a client with a custom timeout and scheme enforcement.
+    ///
+    /// **Scheme policy (Issue 23):** `https://` is always allowed. `http://`
+    /// is allowed only when the host resolves to a loopback address
+    /// (127.0.0.1, ::1, or "localhost"). since broadcast_tx sends raw signed
+    /// transactions over this connection and get_tx/get_block_txs are the
+    /// node's only source of chain data for consensus decisions. A non-loopback
+    /// `http://` URL is rejected — an on-path attacker could read broadcast
+    /// transactions and tamper with returned block/tx data.
+    ///
+    /// Returns `Err` if the URL is malformed or uses plain HTTP for a
+    /// non-loopback host.
+    pub fn with_timeout(base_url: String, timeout_secs: u64) -> Result<Self> {
+        validate_url_scheme(&base_url)?;
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
@@ -117,10 +173,10 @@ impl ElectrsClient {
                 tracing::warn!("[Electrs] Failed to build HTTP client with timeout: {} — using default", e);
                 Client::new()
             });
-        Self {
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
-        }
+        })
     }
 
     pub async fn get_tip_height(&self) -> Result<u64> {

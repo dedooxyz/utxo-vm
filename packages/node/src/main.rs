@@ -25,6 +25,12 @@ struct Cli {
     #[arg(long, env = "CHAIN", default_value = "JKC_TESTNET")]
     chain: String,
 
+    /// Electrs URL. https:// is required for any non-loopback host (plain
+    /// http:// is allowed only for 127.0.0.1, ::1, localhost). broadcast_tx
+    /// sends raw signed transactions over this connection and get_tx/
+    /// get_block_txs are the node's only source of chain data — an on-path
+    /// attacker on plain HTTP to a remote host could read broadcasts and
+    /// tamper with responses.
     #[arg(long, env = "ELECTRS_URL")]
     electrs_url: Option<String>,
 
@@ -360,7 +366,8 @@ async fn main() -> Result<()> {
     });
 
     // Initialize Electrs client & processor
-    let electrs = ElectrsClient::with_timeout(electrs_url.clone(), cli.electrs_timeout_secs);
+    let electrs = ElectrsClient::with_timeout(electrs_url.clone(), cli.electrs_timeout_secs)
+        .context("constructing Electrs client (scheme validation)")?;
     let processor = Arc::new(BlockProcessor::new(
         store.clone(),
         cli.chain.clone(),

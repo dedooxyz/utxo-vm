@@ -83,7 +83,7 @@ async fn spawn_oversized_server() -> String {
 #[tokio::test]
 async fn test_issue22_get_mempool_tx_ids_rejects_oversized_response() {
     let url = spawn_oversized_server().await;
-    let client = ElectrsClient::with_timeout(url, 5);
+    let client = ElectrsClient::with_timeout(url, 5).expect("loopback http must be allowed");
     let result = client.get_mempool_tx_ids().await;
     assert!(result.is_err(), "oversized response must be rejected");
     let err = result.unwrap_err().to_string();
@@ -97,7 +97,7 @@ async fn test_issue22_get_mempool_tx_ids_rejects_oversized_response() {
 #[tokio::test]
 async fn test_issue22_get_block_txs_rejects_oversized_response() {
     let url = spawn_oversized_server().await;
-    let client = ElectrsClient::with_timeout(url, 5);
+    let client = ElectrsClient::with_timeout(url, 5).expect("loopback http must be allowed");
     let valid_hash = "a".repeat(64);
     let result = client.get_block_txs(&valid_hash).await;
     assert!(result.is_err(), "oversized response must be rejected");
@@ -107,4 +107,50 @@ async fn test_issue22_get_block_txs_rejects_oversized_response() {
         "error must mention the size cap, got: {}",
         err
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue 23: TLS / scheme enforcement on electrs URL
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_issue23_https_url_allowed() {
+    let result = ElectrsClient::with_timeout("https://jkc-testnet-api.s3na.xyz".to_string(), 5);
+    assert!(result.is_ok(), "https URL must be allowed for any host");
+}
+
+#[test]
+fn test_issue23_loopback_http_allowed() {
+    let result = ElectrsClient::with_timeout("http://127.0.0.1:3000".to_string(), 5);
+    assert!(result.is_ok(), "loopback http must be allowed");
+
+    let result = ElectrsClient::with_timeout("http://localhost:3000".to_string(), 5);
+    assert!(result.is_ok(), "localhost http must be allowed");
+
+    let result = ElectrsClient::with_timeout("http://[::1]:3000".to_string(), 5);
+    assert!(result.is_ok(), "[::1] http must be allowed");
+}
+
+#[test]
+fn test_issue23_non_loopback_http_rejected() {
+    let result = ElectrsClient::with_timeout("http://jkc-testnet-api.s3na.xyz".to_string(), 5);
+    assert!(result.is_err(), "non-loopback http must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("plain http") || err.contains("non-loopback") || err.contains("https"),
+        "error must explain the scheme policy, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_issue23_non_loopback_http_rejected_no_port() {
+    let result = ElectrsClient::with_timeout("http://example.com".to_string(), 5);
+    assert!(result.is_err(), "non-loopback http without port must be rejected");
+}
+
+#[test]
+fn test_issue23_invalid_scheme_rejected() {
+    let result = ElectrsClient::with_timeout("ftp://127.0.0.1".to_string(), 5);
+    assert!(result.is_err(), "non-http(s) scheme must be rejected");
 }
