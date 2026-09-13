@@ -490,6 +490,15 @@ impl VmRuntime {
             return Err("Module does not implement required ABI: missing 'allocate' export".to_string());
         }
 
+        // If contract exports call(), allocate MUST be exported so the method
+        // name can be written to guest memory. Without allocate, call() would
+        // receive method_ptr=0 and dispatch on an unwritten/zero pointer —
+        // silently wrong behavior instead of a clear ABI-mismatch error.
+        let has_call = instance.get_typed_func::<(i32, i32, i32), i32>(&mut store, "call").is_ok();
+        if has_call && !has_alloc {
+            return Err("Module does not implement required ABI: missing 'allocate' export".to_string());
+        }
+
         let allocate_guest = |store: &mut Store<HostContext>, size: i32| -> Result<i32, String> {
             let alloc_fn = instance
                 .get_typed_func::<i32, i32>(&mut *store, "allocate")

@@ -88,6 +88,7 @@ fn test_fuel_gas_metering_out_of_gas() {
     let infinite_loop_wat = r#"
         (module
             (memory (export "memory") 1)
+            (func (export "allocate") (param $size i32) (result i32) (i32.const 0x1000))
             (func (export "call") (param $method_ptr i32) (param $args_ptr i32) (param $args_len i32) (result i32)
                 (loop $infinite (br $infinite))
                 (i32.const 0)
@@ -887,7 +888,41 @@ fn test_missing_allocate_with_get_state_fails() {
 }
 
 #[test]
-fn test_missing_allocate_with_empty_args_and_state_succeeds() {
+fn test_missing_allocate_with_no_call_export_succeeds() {
+    // A module with no call() export at all (no-op / state-only module) does
+    // not need allocate — method_ptr is never used since call() is never
+    // invoked. This is the only valid fast path without allocate.
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+    let state = SmartObjectState {
+        object_id: "obj_noop_no_call".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "0011223344".to_string(),
+            vout: 0,
+        },
+        satoshis: 1000,
+        owner_pubkey: "alice".to_string(),
+        state_data: vec![],
+    };
+    let res = runtime.execute(&wasm_bytes, &state, "alice".to_string(), "foo", b"");
+    assert!(res.is_ok(), "No-op module without call() should succeed without allocate, got: {:?}", res.err());
+    let exec = res.unwrap();
+    assert_eq!(exec.return_code, 0);
+}
+
+#[test]
+fn test_missing_allocate_with_call_export_and_empty_args_state_fails() {
+    // Issue 7: A module that exports call() but NOT allocate, invoked with
+    // empty args and empty state. Previously this silently passed method_ptr=0
+    // to call() — the method name was never written to guest memory, causing
+    // silent wrong dispatch. Now it must fail loudly with a clear ABI-mismatch
+    // error, consistent with the other allocate-required guards.
     let wat = r#"
         (module
             (memory (export "memory") 1)
@@ -899,7 +934,7 @@ fn test_missing_allocate_with_empty_args_and_state_succeeds() {
     let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
     let runtime = VmRuntime::new(VmConfig::default());
     let state = SmartObjectState {
-        object_id: "obj_empty_fast_path".to_string(),
+        object_id: "obj_call_no_alloc".to_string(),
         code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
         seal: SingleUseSeal {
             txid: "0011223344".to_string(),
@@ -910,8 +945,12 @@ fn test_missing_allocate_with_empty_args_and_state_succeeds() {
         state_data: vec![],
     };
     let res = runtime.execute(&wasm_bytes, &state, "alice".to_string(), "foo", b"");
-    assert!(res.is_ok());
-    let exec = res.unwrap();
-    assert_eq!(exec.return_code, 42);
+    assert!(res.is_err(), "Module with call() but no allocate must fail even with empty args/state");
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("missing 'allocate' export"),
+        "Error should mention missing allocate export, got: {}",
+        err
+    );
 }
 
