@@ -4,6 +4,41 @@ use crate::consensus::ConsensusManager;
 use crate::storage::SparseMerkleTree;
 use crate::types::StateAttestation;
 
+/// Recursively sort object keys in a `serde_json::Value` so that serialization
+/// is canonical (independent of insertion order). This protects the Merkle
+/// leaf hash from depending on whether `serde_json`'s `preserve_order` Cargo
+/// feature is active anywhere in the dependency graph (Cargo unifies features
+/// project-wide). Without this, the same logical object data could hash
+/// differently depending on incidental construction order.
+fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Collect and sort keys, then recursively canonicalize each value.
+            let mut sorted: Vec<(String, serde_json::Value)> = map
+                .iter()
+                .map(|(k, v)| (k.to_string(), canonicalize_json_value(v)))
+                .collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut obj = serde_json::Map::new();
+            for (k, v) in sorted {
+                obj.insert(k, v);
+            }
+            serde_json::Value::Object(obj)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(canonicalize_json_value).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Serialize a `serde_json::Value` with canonically sorted object keys,
+/// producing a deterministic byte encoding suitable for hashing.
+fn canonical_json_to_vec(value: &serde_json::Value) -> Vec<u8> {
+    let canonical = canonicalize_json_value(value);
+    serde_json::to_vec(&canonical).unwrap_or_default()
+}
+
 /// Cross-chain proof from a source chain
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossChainProof {
@@ -191,10 +226,10 @@ impl CrossChainVerifier {
             arr
         };
 
-        // Parse the object data as value (canonical serialization via to_vec)
+        // Parse the object data as value (canonical serialization with sorted keys)
         let value = {
             use sha2::{Digest, Sha256};
-            let data_bytes = serde_json::to_vec(&proof.object_data).unwrap_or_default();
+            let data_bytes = canonical_json_to_vec(&proof.object_data);
             let hash = Sha256::digest(&data_bytes);
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&hash);
@@ -266,5 +301,54 @@ mod tests {
         let result = verifier.verify_proof(&proof);
         assert!(!result.valid);
         assert!(!result.quorum_reached);
+    }
+
+    #[test]
+    fn test_merkle_leaf_hash_independent_of_key_insertion_order() {
+        // Two serde_json::Value::Objects with the same key/value pairs but
+        // inserted in different orders must produce identical Merkle leaf
+        // hashes. This locks in the canonicalization invariant: the hash
+        // must not depend on whether serde_json's `preserve_order` Cargo
+        // feature is active anywhere in the dependency graph.
+        use sha2::{Digest, Sha256};
+
+        // Build object A: keys inserted in alphabetical order
+        let mut map_a = serde_json::Map::new();
+        map_a.insert("z".to_string(), serde_json::json!(1));
+        map_a.insert("a".to_string(), serde_json::json!(2));
+        map_a.insert("m".to_string(), serde_json::json!(3));
+        let obj_a = serde_json::Value::Object(map_a);
+
+        // Build object B: same pairs, reverse insertion order
+        let mut map_b = serde_json::Map::new();
+        map_b.insert("m".to_string(), serde_json::json!(3));
+        map_b.insert("a".to_string(), serde_json::json!(2));
+        map_b.insert("z".to_string(), serde_json::json!(1));
+        let obj_b = serde_json::Value::Object(map_b);
+
+        let hash_a = Sha256::digest(&canonical_json_to_vec(&obj_a));
+        let hash_b = Sha256::digest(&canonical_json_to_vec(&obj_b));
+        assert_eq!(
+            hash_a, hash_b,
+            "Merkle leaf hash must be identical regardless of key insertion order"
+        );
+
+        // Also verify nested objects are canonicalized recursively
+        let nested_a = serde_json::json!({"outer": {"b": 1, "a": 2}, "x": 0});
+        let nested_b = serde_json::json!({"x": 0, "outer": {"a": 2, "b": 1}});
+        let hash_na = Sha256::digest(&canonical_json_to_vec(&nested_a));
+        let hash_nb = Sha256::digest(&canonical_json_to_vec(&nested_b));
+        assert_eq!(
+            hash_na, hash_nb,
+            "Nested object key order must not affect Merkle leaf hash"
+        );
+
+        // Different key/value content must still produce different hashes
+        let different = serde_json::json!({"a": 2, "z": 99, "m": 3});
+        let hash_diff = Sha256::digest(&canonical_json_to_vec(&different));
+        assert_ne!(
+            hash_a, hash_diff,
+            "Different content must produce different Merkle leaf hashes"
+        );
     }
 }
