@@ -411,8 +411,14 @@ struct PutContractRequest {
 
 async fn put_dht_contract(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<PutContractRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Issue 8: Require auth for DHT contract writes, same as bridge endpoints.
+    // Without this, anyone could write into a distributed store that other
+    // nodes replicate.
+    verify_bridge_auth(&headers, &state.bridge_api_key)?;
+
     validate_hex(&req.code_hash, "code_hash")?;
     validate_hex(&req.wasm_hex, "wasm_hex")?;
 
@@ -421,6 +427,22 @@ async fn put_dht_contract(
 
     if wasm_bytes.len() > MAX_WASM_SIZE {
         return Err((StatusCode::BAD_REQUEST, format!("WASM too large: {} bytes (max {})", wasm_bytes.len(), MAX_WASM_SIZE)));
+    }
+
+    // Issue 8: Verify sha256(wasm_bytes) == claimed code_hash before storing.
+    // This is the content-addressing guarantee: code_hash is a commitment to
+    // specific bytecode. Without this check, a caller could lie about code_hash
+    // and make this node's store serve attacker-chosen WASM under a trusted hash.
+    use sha2::{Digest, Sha256};
+    let computed_hash = hex::encode(Sha256::digest(&wasm_bytes));
+    if computed_hash != req.code_hash {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "code_hash mismatch: claimed={} but sha256(wasm)={}",
+                req.code_hash, computed_hash
+            ),
+        ));
     }
 
     state
@@ -448,6 +470,21 @@ async fn get_dht_contract(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(wasm) = wasm_opt {
+        // Issue 8: Verify sha256(wasm) == code_hash before returning. If a
+        // stored record is ever inconsistent (e.g. from before this fix, or
+        // from a code path that bypasses verification), return an error
+        // rather than silently serving wrong data.
+        use sha2::{Digest, Sha256};
+        let computed_hash = hex::encode(Sha256::digest(&wasm));
+        if computed_hash != code_hash {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Stored contract hash mismatch: key={} but sha256(wasm)={}. Record is corrupt.",
+                    code_hash, computed_hash
+                ),
+            ));
+        }
         Ok(Json(serde_json::json!({
             "codeHash": code_hash,
             "wasmHex": hex::encode(wasm)

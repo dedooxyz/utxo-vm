@@ -263,6 +263,24 @@ impl P2pService {
                             }
                         }
                         Some(P2pCommand::PutContract { code_hash, wasm_bytes, resp }) => {
+                            // Verify sha256(wasm_bytes) == code_hash before storing.
+                            // This mirrors the gossipsub ingest path (line ~352-361)
+                            // and prevents content-addressing violations: without
+                            // this check, a caller could claim a well-known code_hash
+                            // maps to attacker-chosen WASM in this node's local store.
+                            use sha2::{Digest, Sha256};
+                            let computed_hash = hex::encode(Sha256::digest(&wasm_bytes));
+                            if computed_hash != code_hash {
+                                warn!(
+                                    "[P2P] Rejected local contract put: hash mismatch (claimed={}, computed={})",
+                                    code_hash, computed_hash
+                                );
+                                let _ = resp.send(Err(anyhow::anyhow!(
+                                    "code_hash mismatch: claimed={} but sha256(wasm)={}",
+                                    code_hash, computed_hash
+                                )));
+                                continue;
+                            }
                             // Store locally in Kademlia store
                             let key = RecordKey::new(&code_hash);
                             let record = Record {
