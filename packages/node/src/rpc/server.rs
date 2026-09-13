@@ -35,6 +35,10 @@ pub struct AppState {
     pub bridge_api_key: Option<String>,
     /// Allowed CORS origins. If empty, CORS is disabled (deny cross-origin).
     pub cors_origins: Vec<String>,
+    /// Trusted reverse proxy IPs. When non-empty, X-Forwarded-For is trusted
+    /// only for requests from these IPs. When empty, the rate limiter uses the
+    /// real connection socket address (safe default for non-proxy deployments).
+    pub trusted_proxy_ips: Vec<String>,
 }
 
 /// F1.4: Verify bridge API key from Authorization header.
@@ -127,14 +131,32 @@ async fn rate_limit_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, &'static str)> {
-    // Extract client IP from X-Forwarded-For or socket address
-    let ip = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
+    // Issue 9: Extract client IP from the real connection socket address.
+    // X-Forwarded-For is only trusted when the request originates from a
+    // configured trusted proxy IP. Without this check, any client could set
+    // an arbitrary X-Forwarded-For value to get a fresh rate-limit bucket
+    // on every request, fully bypassing the limiter.
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let real_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+
+    let ip = if state.trusted_proxy_ips.iter().any(|p| p == &real_ip) {
+        // Request is from a trusted proxy — trust X-Forwarded-For
+        req.headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|s| s.trim().to_string())
+            .unwrap_or(real_ip)
+    } else {
+        // Direct connection or untrusted proxy — use real socket address
+        real_ip
+    };
 
     if state.rate_limiter.check(&ip) {
         Ok(next.run(req).await)

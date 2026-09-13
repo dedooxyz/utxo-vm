@@ -96,6 +96,15 @@ struct Cli {
     /// Example: "https://app.utxovm.org,https://explorer.utxovm.org"
     #[arg(long, env = "CORS_ORIGINS", value_delimiter = ',')]
     cors_origins: Vec<String>,
+
+    /// Comma-separated list of trusted reverse proxy IPs. When set, the
+    /// rate limiter trusts X-Forwarded-For only for requests originating
+    /// from these IPs. When not set (default), the rate limiter keys off
+    /// the real connection socket address and ignores X-Forwarded-For
+    /// entirely — this is the safe default for direct (non-proxy) deployments.
+    /// Example: "127.0.0.1,10.0.0.1"
+    #[arg(long, env = "TRUSTED_PROXY_IPS", value_delimiter = ',')]
+    trusted_proxy_ips: Vec<String>,
 }
 
 #[tokio::main]
@@ -257,6 +266,64 @@ async fn main() -> Result<()> {
                             last_synced = sh.saturating_sub(1);
                         }
                     }
+
+                    // Reorg detection: verify local block hash at last_synced matches L1
+                    if last_synced > 0 {
+                        if let Ok(Some(local_block)) = store_sync.get_block(last_synced) {
+                            if let Ok(l1_hash) = electrs_sync.get_block_hash(last_synced).await {
+                                if l1_hash != local_block.block_hash {
+                                    warn!(
+                                        "[Scanner] Chain reorganization detected at height #{}: local {} != L1 {}",
+                                        last_synced, local_block.block_hash, l1_hash
+                                    );
+                                    // Backtrack to find common ancestor
+                                    let mut ancestor = last_synced.saturating_sub(1);
+                                    let mut found_ancestor = false;
+                                    while ancestor > 0 {
+                                        if let Ok(Some(prev_local)) = store_sync.get_block(ancestor) {
+                                            match electrs_sync.get_block_hash(ancestor).await {
+                                                Ok(prev_l1_hash) => {
+                                                    if prev_l1_hash == prev_local.block_hash {
+                                                        found_ancestor = true;
+                                                        break;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!(
+                                                        "[Scanner] RPC error fetching block #{} during reorg backtrack: {:?}",
+                                                        ancestor, e
+                                                    );
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        ancestor = ancestor.saturating_sub(1);
+                                    }
+
+                                    if found_ancestor {
+                                        info!("[Scanner] Rolling back to common ancestor #{}", ancestor);
+                                        match store_sync.rollback_to_block(&chain_sync, ancestor) {
+                                            Ok(n) => {
+                                                info!("[Scanner] Successfully rolled back {} transitions to #{}", n, ancestor);
+                                                last_synced = ancestor;
+                                            }
+                                            Err(e) => {
+                                                error!("[Scanner] Rollback to #{} failed: {:?}", ancestor, e);
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        error!(
+                                            "[Scanner] Could not safely determine common ancestor for reorg at height #{}; retrying next cycle",
+                                            last_synced
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if tip_height > last_synced {
                         info!("[Scanner] New blocks detected: #{} -> #{}", last_synced, tip_height);
                         for h in (last_synced + 1)..=tip_height {
@@ -319,6 +386,7 @@ async fn main() -> Result<()> {
         rate_limiter: std::sync::Arc::new(utxo_vmd::rpc::server::RateLimiter::new(cli.rate_limit_rps)),
         bridge_api_key: cli.bridge_api_key,
         cors_origins: cli.cors_origins,
+        trusted_proxy_ips: cli.trusted_proxy_ips,
     };
 
     let router = create_router(app_state);
@@ -336,7 +404,10 @@ async fn main() -> Result<()> {
         info!("[Shutdown] Received Ctrl+C, shutting down gracefully...");
     };
 
-    let server = axum::serve(listener, router)
+    // Issue 9: Use into_make_service_with_connect_info so the rate limiter
+    // can access the real connection socket address instead of trusting
+    // the client-supplied X-Forwarded-For header.
+    let server = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal);
 
     server.await?;
