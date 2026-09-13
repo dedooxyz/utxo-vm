@@ -224,7 +224,7 @@ All txs verifiable at: `https://jkc-testnet-api.s3na.xyz/tx/<txid>`
 - Scanned blocks 177,599 → 177,646
 - RPC endpoints verified: `/api/v1/chain/info`, `/api/v1/state-root`, `/api/v1/objects`, `/api/v1/consensus/slashing-proofs`
 - P2P identity loaded: `12D3KooWE2eX822K2gRu74yjosXYYeVykuiQHsrJEjVC6ruehrhH`
-- State root: `bbde6793dc0d7247bd110d9c38cee4c05698923175cf59fa3dda499da7f167b0`
+- State root: `bbde6793dc0d7247bd110d9c38cee4c05698923175cf59fa3dda499da7f167b0` (computed under the old sorted-leaves SMT format; no longer valid after Issue 12 — the true fixed-depth SMT produces a different root for the same state)
 - Note: scanner's envelope parser expects `OP_FALSE OP_IF "utxovm" ...` format; live test txs used simplified `OP_RETURN "utxovm:deploy"` format
 
 ---
