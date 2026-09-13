@@ -208,7 +208,7 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 - Batch: `a9de1d94b9e1b2089a9a7bc1be1680b98262dd919f9efe7bbba7344967f52a8d`
 
 **Remaining:**
-- Integration with scanner for automatic fraud detection
+- ~~Integration with scanner for automatic fraud detection~~ ✅ Done — `run_fraud_watch_pass` in `main.rs` runs as a background task, detects divergence + equivocation on each accepted attestation, and builds/broadcasts a challenge tx when a vault config + bond UTXO are configured (logged with `[FraudWatch]` prefix). Tests in `tests/fraud_watch_tests.rs`.
 
 ### Step 5: Operator Set v0 — ✅ Done
 
