@@ -52,7 +52,7 @@ This document defines the security model for UTXO-VM on Junkcoin (JKC). It speci
     \item $\mathcal{O}_i$ --- Operator $i$ with public key $pk_i$ and bond UTXO $b_i$.
     \item $W$ --- Pinned WASM bytecode, content-addressed as $h_W = \text{SHA256}(W)$.
     \item $S_t$ --- Smart object state at block height $t$.
-    \item $R_t$ --- State root at height $t$: $R_t = \text{SMT\_ROOT}(\{(k_j, v_j)\}_{j=1}^{n})$ where $k_j$ is object ID and $v_j$ is serialized state.
+    \item $R_t$ --- State root at height $t$: $R_t = \text{SMT\_ROOT}(\{(k_j, v_j)\}_{j=1}^{n})$ where $k_j$ is object ID and $v_j$ is serialized state. \textbf{Note (Issue 12):} $\text{SMT\_ROOT}$ is a true 256-bit fixed-depth sparse Merkle tree root (domain-separated: \texttt{SMT\_LEAF}, \texttt{SMT\_NODE}). This is a consensus-breaking change from the previous sorted-leaves Merkle root. Old and new roots for the same state are not equal. Cutover must be coordinated across all operators and external verifiers, like the attestation domain separator version bump (Issue 5).
     \item $\sigma_i(m)$ --- ECDSA secp256k1 signature of operator $i$ on message $m$.
     \item $\text{seal}(txid, vout)$ --- Single-use seal: a UTXO reference.
     \item $\mathcal{B}$ --- Batch commitment: the L1 transaction posted by operator.
