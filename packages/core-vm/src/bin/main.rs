@@ -190,6 +190,15 @@ fn handle_code_hash(args: &serde_json::Value) -> Result<serde_json::Value, Strin
     }))
 }
 
+/// Replay a fixture and return the canonical state root.
+/// `args` is the fixture document itself: `{version:1, operations:[...]}`.
+/// Two independent processes replaying the same fixture MUST produce the
+/// same `state_root` — this is the "you are not the indexer" check.
+fn handle_verify(args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let bytes = serde_json::to_vec(args).map_err(|e| format!("fixture encode: {}", e))?;
+    utxo_core_vm::fixture::verify_fixture(&bytes)
+}
+
 fn main() {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input).expect("Failed to read input");
@@ -200,6 +209,7 @@ fn main() {
         "deploy" => handle_deploy(&request.args),
         "execute" => handle_execute(&request.args),
         "code_hash" => handle_code_hash(&request.args),
+        "verify" => handle_verify(&request.args),
         _ => Err(format!("Unknown command: {}", request.command)),
     };
 

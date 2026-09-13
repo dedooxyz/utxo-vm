@@ -69,7 +69,7 @@ UTXO-VM is a 100% original, clean-room, FOSS (MIT) implementation. Key distincti
 
 ## 5. Privacy: MWEB & Stealth (FUTURE)
 
-> **Status:** MWEB is NOT yet active on JKC (planned at height 180,000; empirically verified not active at block 177,269). Host functions (`host_stealth_settle`, `host_mweb_peg_out`) exist in the runtime but are NOT on the v1 settlement path.
+> **Status:** MWEB is ACTIVE on JKC testnet (verified at block 183,374 — blocks contain HogEx transactions with OP_8 witness-v8 programs). Host functions (`host_stealth_settle`, `host_mweb_peg_out`) record settlement intent in the runtime; actual peg-out requires an MWEB-capable wallet to build MW kernels/rangeproofs — NOT on the v1 settlement path.
 
 Planned privacy patterns once MWEB activates:
 

@@ -330,7 +330,29 @@ async fn main() -> Result<()> {
                             if let Ok(block_hash) = electrs_sync.get_block_hash(h).await {
                                 if let Ok(txs) = electrs_sync.get_block_txs(&block_hash).await {
                                     for tx in &txs {
-                                        let _ = processor.process_tx(tx, h);
+                                        match processor.process_tx(tx, h) {
+                                            Err(e) => {
+                                                // If the WASM blob for a call is not in the
+                                                // local store, fetch it from the Kademlia DHT,
+                                                // persist it (hash-verified), and retry once.
+                                                if let Some(code_hash) = utxo_vmd::scanner::missing_wasm_hash(&e) {
+                                                    match p2p_sync.get_contract(code_hash.clone()).await {
+                                                        Ok(Some(bytes)) => {
+                                                            match store_sync.save_wasm(&code_hash, &bytes) {
+                                                                Ok(()) => {
+                                                                    info!("[Scanner] Fetched WASM {} ({} bytes) from DHT — retrying tx", code_hash, bytes.len());
+                                                                    let _ = processor.process_tx(tx, h);
+                                                                }
+                                                                Err(e2) => warn!("[Scanner] DHT wasm hash verification failed for {}: {}", code_hash, e2),
+                                                            }
+                                                        }
+                                                        Ok(None) => warn!("[Scanner] WASM {} not found on DHT — tx skipped", code_hash),
+                                                        Err(e2) => warn!("[Scanner] DHT fetch error for {}: {}", code_hash, e2),
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
 

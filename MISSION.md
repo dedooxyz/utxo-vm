@@ -18,14 +18,14 @@ Covers:
 
 **Status: Published as v0.5. Ready for review.**
 
-### 2. Pin the Execution Kernel
+### 2. Pin the Execution Kernel — ✅ Done
 
 - Freeze WASM ISA, host ABI, gas rules, serialization
 - One content-addressed runtime hash (core-vm commit = law)
 - Two independent replays of the same fixture must match bit-for-bit
 - No "upgrade the VM" without a new contract class / new pin
 
-### 3. Specify L1 Primitives (before Taproot lands, as tapleaf templates)
+### 3. Specify L1 Primitives (before Taproot lands, as tapleaf templates) — ✅ Done
 
 Design, then implement when JKC has Taproot + the opcodes you need:
 
@@ -40,7 +40,7 @@ Design, then implement when JKC has Taproot + the opcodes you need:
 
 L1 never runs WASM. L1 only checks sigs, timelocks, hashes.
 
-### 4. Minimal Product on Testnet
+### 4. Minimal Product on Testnet — ✅ Done
 
 One loop only:
 
@@ -141,10 +141,10 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 ### Step 1: Freeze Trust Model — ✅ Done
 
 `docs/TRUST-MODEL.tex` v0.5 published. Compilable to PDF. Versioned.
-- JKC confirmed: Taproot, SegWit, full opcodes (OP\_CAT), MWEB planned
+- JKC confirmed: Taproot, SegWit, full opcodes (OP\_CAT active on testnet), MWEB active on testnet (verified h=183,374)
 - Block time corrected: 1 minute (not 2.5 minutes)
 - P2TR vault scripts with Taproot script paths for challenge/exit
-- OP\_CAT enabled: hash comparison in scripts without precomputation
+- OP\_CAT active on testnet but NOT used in bonding scripts (covenants.rs deleted in Issue 14; hash comparison uses OP_EQUAL)
 - Interactive fraud proof (binary search) for v2 invalid root slash
 - Lazy operator detection and 50% bond slash
 - Operator rotation mechanism (1440 blocks ≈ 1 day)
@@ -161,21 +161,21 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 
 | Requirement | Status | Evidence |
 |:---|:---|:---|
-| Frozen host ABI | **Done** | 9 host functions defined in `runtime.rs` with centralized fuel costs in `fuel_costs` module |
+| Frozen host ABI | **Done** | 7 host functions defined in `runtime.rs` with centralized fuel costs in `fuel_costs` module (plus AssemblyScript `abort` handler) |
 | Wasmtime fuel only | **Done** | GasMeter removed from lib.rs exports, fuel costs centralized, runtime uses `store.set_fuel()` |
 | env.abort traps | **Done** | Returns `Err(anyhow::anyhow!(...))` — instance traps |
 | Memory page cap enforced | **Done** | `Config::static_memory_maximum_size()` applied in `VmRuntime::new()` |
 | Two replays match | **Done** | `test_deterministic_replay_identical_root` — two independent `VmRuntime` instances, same fixture, identical state |
-| Mock proofs gated | **Done** | `zk.rs` behind `#[cfg(feature = "experimental-zk")]`, mock acceptance only in `#[cfg(test)]` |
-| host_verify_groth16 gated | **Done** | Behind `#[cfg(feature = "experimental-zk")]` in linker |
+| ZK stack removed | **Done** | `zk.rs`, `experimental-zk` feature, `ark-*` deps, and `host_verify_groth16` deleted — ZK has no v1 use case |
 | OP_CAT covenants deleted | **Done** | `covenants.rs` removed (Issue 14); `verify_equivocation_proof` moved to `attestation.rs` |
-| ZK deps optional | **Done** | `ark-*` behind `optional = true` + `experimental-zk` feature |
 | Fuel exhaustion reverts | **Done** | `test_fuel_exhaustion_no_state_write` verifies state unchanged after fuel error |
 | Abort traps test | **Done** | `test_abort_traps` — WAT calling `env.abort` traps successfully |
 | Bad hash test | **Done** | `test_bad_wasm_hash_rejected` — mismatched code_hash rejected by runtime |
 | Code_hash validation | **Done** | `execute()` validates WASM hash against pinned `state.code_hash` before execution |
 | WASM ISA spec | **Done** | `docs/WASM-ISA.md` — formal specification of supported WASM features and execution model |
 | Content-addressed runtime hash | **Done** | `VmRuntime::calculate_runtime_hash()` and `VmRuntime::version()` for runtime verification |
+| C ABI + verify() | **Done** | `src/ffi.rs` extern "C" (`utxovm_deploy/execute/verify/code_hash/runtime_version/free_string`) + `include/utxovm.h`; crate builds rlib+cdylib+staticlib |
+| Two-process fixture replay | **Done** | `src/fixture.rs` + CLI `verify` command; `test_fixture_replay_two_processes` spawns the CLI twice on the same fixture → identical `state_root` |
 
 ### Step 3: L1 Primitives — ✅ Done
 
@@ -184,7 +184,7 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 | Seal spend | **Done** | `build_seal_spend_output()` in `l1_scripts.rs` |
 | Operator vault | **Done** | `build_vault_script_tree()` with P2TR script paths |
 | Batch commitment | **Done** | `build_batch_commitment_output()` with OP_RETURN |
-| Challenge leaf | **Done** | `build_challenge_leaf()` with OP_CAT |
+| Challenge leaf | **Done** | `build_challenge_leaf()` with OP_CHECKSIGADD (BIP-342, no OP_CAT) |
 | Silence escape | **Done** | `build_silence_escape_script()` with CSV |
 | Fee output | **Done** | `build_indexer_fee_output()` |
 
@@ -208,7 +208,6 @@ A user can mint/transfer an object on JKC, an operator set attests it, a third p
 - Batch: `a9de1d94b9e1b2089a9a7bc1be1680b98262dd919f9efe7bbba7344967f52a8d`
 
 **Remaining:**
-- On-chain challenge broadcast (requires Taproot script path spending)
 - Integration with scanner for automatic fraud detection
 
 ### Step 5: Operator Set v0 — ✅ Done

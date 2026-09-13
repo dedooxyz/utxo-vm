@@ -13,7 +13,7 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 | Taproot (BIP-341) | ✅ Active (h=160,000) | ✅ Active |
 | CLTV (BIP-65) | ❌ Not active (bip65=99,999,999) | ✅ Active |
 | OP_CAT | ✅ Active (confirmed by developer) | ✅ Active |
-| MWEB | ❌ Not active (h=180,000 planned) | ❌ Not active (optional/later) |
+| MWEB | ✅ Active (verified h=183,374 — HogEx tx present in blocks) | ❌ Not active (optional/later) |
 
 > Source: `packages/node/src/consensus/l1_scripts.rs` header comment.
 > Note: CLTV is available on mainnet but NOT on testnet. Testnet scripts use CSV only.
@@ -25,7 +25,7 @@ This document outlines the JKC chain work required for UTXO-VM integration.
 - [x] Tapscript (v0/v1)
 - [x] Key path spending
 - [x] Script path spending
-- [ ] MWEB (planned, not yet active)
+- [x] MWEB (active on testnet — verified h=183,374, HogEx tx present)
 
 ## 2. Required Opcode List
 
@@ -143,7 +143,8 @@ OP_ENDIF
 // Script path: M-of-N watcher committee can spend to challenge UTXO
 //
 // Leaf 0 (unbond): <unbond_delay> CSV DROP <operator_pubkey> CHECKSIG
-// Leaf 1 (challenge): <M> <pubkey1..N> <N> CHECKMULTISIG
+// Leaf 1 (challenge): <pk1> CHECKSIG <pk2> CHECKSIGADD ... <pkN> CHECKSIGADD <M> OP_EQUAL
+//                      (BIP-342: individual CHECKSIG + CHECKSIGADD, NOT CHECKMULTISIG)
 //
 // Challenge UTXO second stage:
 //   Claim leaf: <claim_delay> CSV DROP <challenger_pubkey> CHECKSIG
@@ -157,9 +158,10 @@ OP_ENDIF
 ```rust
 // Equivocation proof verified OFF-CHAIN (two signed attestations,
 // different roots, same operator). L1 only checks committee authorization.
+// BIP-342: use CHECKSIGADD for M-of-N, NOT CHECKMULTISIG (disabled in tapscript).
 let challenge_script = script! {
-    // Committee authorization (M-of-N watchers)
-    OP_CHECKMULTISIG
+    // Committee authorization (M-of-N watchers, BIP-342)
+    <pk1> OP_CHECKSIG <pk2> OP_CHECKSIGADD ... <pkN> OP_CHECKSIGADD <M> OP_EQUAL
 }
 ```
 
@@ -201,7 +203,7 @@ let seal_script = script! {
 | CHECKSIGADD | ✅ Active | Tapscript |
 | CLTV (BIP-65) | ✅ Mainnet / ❌ Testnet | Testnet bip65=99,999,999; mainnet active |
 | OP_CAT | ✅ Active | Testnet confirmed; not used in live bonding scripts (covenants.rs deleted in Issue 14) |
-| MWEB | ⏳ Planned | Not yet active (h=180,000 planned, optional/later) |
+| MWEB | ✅ Active (testnet) | Verified h=183,374 — blocks contain HogEx txs (OP_8 witness-v8 programs). Peg-out from contracts still requires an MWEB-capable wallet (kernels/rangeproofs). |
 
 ## 8. Testing
 
@@ -210,8 +212,8 @@ let seal_script = script! {
 - [x] CSV-based challenge/silence scripts
 - [x] Seal spend script
 - [x] Batch commitment
-- [ ] Full Taproot script path spending (requires BIP-341 script path spending)
-- [x] OP_CAT challenge script (OP_CAT active on testnet)
+- [x] Full Taproot script path spending (BIP-341 script-path spend confirmed on JKC testnet, 2026-09-10; tx `76ee0e2f...`)
+- [x] BIP-342 compliance: CHECKSIGADD (not CHECKMULTISIG), x-only pubkeys, TapSighashType::All
 
 ### Mainnet Deployment
 - [ ] Taproot activation verification (mainnet)

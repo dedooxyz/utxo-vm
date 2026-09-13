@@ -36,7 +36,7 @@ OP_RETURN <0x6a> <"UTXOVM"> <method_id: 4 bytes> <calldata_bytes>
 
 ### 3.1 Core WASM MVP
 - [x] Integer operations (i32, i64)
-- [x] Float operations (DISABLED - see Section 3)
+- [ ] Float operations (DISABLED - see Section 4.1)
 - [x] Memory operations
 - [x] Control flow (blocks, loops, if/else)
 - [x] Function calls
@@ -78,9 +78,12 @@ All host functions are registered under the `"env"` namespace:
 (import "env" "host_create_object" (func $host_create_object (param i32 i32 i32 i64) (result i32)))
 (import "env" "host_stealth_settle" (func $host_stealth_settle (param i32 i64) (result i32)))
 (import "env" "host_mweb_peg_out" (func $host_mweb_peg_out (param i32 i64) (result i32)))
-(import "env" "host_verify_groth16" (func $host_verify_groth16 (param i32 i32 i32 i32 i32 i32) (result i32)))
 (import "env" "abort" (func $abort (param i32 i32 i32 i32)))
 ```
+
+`host_verify_groth16` was removed — the ZK stack (ark-* deps, `zk.rs`, the
+`experimental-zk` feature) was deleted. ZK is not on the v1 settlement path;
+the court model uses re-execution + watcher committee instead.
 
 ## 5. Memory Model
 
@@ -88,8 +91,8 @@ All host functions are registered under the `"env"` namespace:
 | Parameter | Value | Description |
 |:---|:---|:---|
 | `min_memory_pages` | 1 | Initial memory (64 KB) |
-| `max_memory_pages` | 256 | Maximum memory (16 MB) |
-| `static_memory_maximum_size` | 16 MB | Wasmtime static memory cap |
+| `max_memory_pages` | 32 | Maximum memory (2 MB) — enforced via `Config::static_memory_maximum_size()` |
+| `static_memory_maximum_size` | 2 MB | Wasmtime static memory cap (32 pages × 64 KiB) |
 
 ### 5.2 Memory Layout
 ```
@@ -131,7 +134,6 @@ Each WASM instruction consumes fuel:
 | `host_create_object` | 1000 |
 | `host_stealth_settle` | 500 |
 | `host_mweb_peg_out` | 500 |
-| `host_verify_groth16` | 10000 |
 
 ### 6.3 Trap Conditions
 Execution traps (aborts) when:
@@ -215,9 +217,9 @@ Export current contract state.
 
 ### 7.4 Design Notes
 
-- **get_state scratch buffer:** `get_state` does not report its output size before writing. The host allocates a 64 KiB scratch buffer. If the state exceeds this, the read is truncated. A future ABI revision could add a `get_state_size() -> i32` export to allow exact allocation.
+- **get_state scratch buffer:** If the module exports `get_state_size() -> i32`, the host uses it to allocate an exact buffer (capped at 1 MB). Otherwise, the host falls back to a fixed 64 KiB scratch buffer (`GET_STATE_BUF_SIZE`). If the returned state exceeds the allocated buffer, execution is rejected with a state-overflow error.
 - **deallocate is currently a no-op** in AssemblyScript (GC-managed). Calling it keeps the host/guest contract correct for when that changes.
-- **Fallback:** If the module does not export `allocate`, the host falls back to hardcoded offsets for backward compatibility.
+- **`allocate` is mandatory** when the module accepts calldata (`init_args` or `call` args), receives prior state, or exports `get_state`. Modules missing `allocate` in those cases are rejected with an explicit ABI error (`Module does not implement required ABI: missing 'allocate' export`). Hardcoded memory offset fallbacks were removed in Issue 4 and are strictly prohibited.
 
 ## 8. AssemblyScript Compilation
 

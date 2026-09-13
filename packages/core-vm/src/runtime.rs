@@ -13,8 +13,6 @@ pub mod fuel_costs {
     pub const HOST_CREATE_OBJECT: u64 = 1000;
     pub const HOST_STEALTH_SETTLE: u64 = 500;
     pub const HOST_MWEB_PEG_OUT: u64 = 500;
-    #[cfg(feature = "experimental-zk")]
-    pub const HOST_VERIFY_GROTH16: u64 = 10000;
 }
 
 #[derive(Debug, Clone)]
@@ -263,49 +261,6 @@ impl VmRuntime {
                 }
             })
             .map_err(|e| e.to_string())?;
-
-        // host_verify_groth16 — only available behind experimental-zk feature
-        #[cfg(feature = "experimental-zk")]
-        {
-            linker
-                .func_wrap(
-                    "env",
-                    "host_verify_groth16",
-                    |mut caller: Caller<'_, HostContext>,
-                     vk_ptr: i32,
-                     vk_len: i32,
-                     proof_ptr: i32,
-                     proof_len: i32,
-                     inputs_ptr: i32,
-                     inputs_len: i32|
-                     -> i32 {
-                        if let Ok(fuel) = caller.get_fuel() { let _ = caller.set_fuel(fuel.saturating_sub(fuel_costs::HOST_VERIFY_GROTH16)); }
-                        if let Some(Extern::Memory(mem)) = caller.get_export("memory") {
-                            let mut vk_buf = vec![0u8; vk_len.max(0) as usize];
-                            let mut proof_buf = vec![0u8; proof_len.max(0) as usize];
-                            let mut inputs_buf = vec![0u8; inputs_len.max(0) as usize];
-
-                            if vk_len > 0 && mem.read(&caller, vk_ptr as usize, &mut vk_buf).is_err() {
-                                return 0;
-                            }
-                            if proof_len > 0 && mem.read(&caller, proof_ptr as usize, &mut proof_buf).is_err() {
-                                return 0;
-                            }
-                            if inputs_len > 0 && mem.read(&caller, inputs_ptr as usize, &mut inputs_buf).is_err() {
-                                return 0;
-                            }
-
-                            match crate::zk::verify_groth16(&vk_buf, &proof_buf, &inputs_buf) {
-                                Ok(true) => 1,
-                                _ => 0,
-                            }
-                        } else {
-                            0
-                        }
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-        }
 
         // Built-in abort handler for AssemblyScript — MUST trap, not just warn
         linker

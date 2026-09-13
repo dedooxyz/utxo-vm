@@ -58,8 +58,7 @@ When a WASM smart contract executes inside `core-vm`, it communicates with the h
 | `host_create_object` | `(code_hash_ptr: i32, state_ptr: i32, state_len: i32, satoshis: u64) -> i32` | 1000 | Spawns a child smart object (e.g. minted token) |
 | `host_stealth_settle` | `(stealth_addr_ptr: i32, satoshis: u64) -> i32` | 500 | Authorizes a privacy extension / stealth settlement |
 | `host_mweb_peg_out` | `(stealth_addr_ptr: i32, satoshis: u64) -> i32` | 500 | Initiates MWEB peg-out to a stealth address |
-| `host_verify_groth16` | `(vk_ptr, vk_len, proof_ptr, proof_len, inputs_ptr, inputs_len: i32) -> i32` | 10000 | Verifies a Groth16 ZK proof (currently accepts mock proofs) |
-| `abort` | `(msg, file, line, col: i32)` | -- | AssemblyScript built-in abort handler (logs warning, does NOT trap) |
+| `abort` | `(msg, file, line, col: i32)` | -- | AssemblyScript built-in abort handler (traps via `Err`) |
 
 ---
 
@@ -133,8 +132,8 @@ Seal-native WASM objects on JKC UTXOs. L1 is the court. Bonded `utxo-vmd` operat
 - Contracts: AssemblyScript or Rust → `.wasm`. Artifact of record = SHA-256 of raw WASM.
 - Runtime: Rust + Wasmtime, fuel enabled, no WASI, no floats in the ABI, one frozen engine config.
 - Node: `packages/node` (`utxo-vmd`) only. Do not grow `packages/indexer` (TS) except to delete or shim to the Rust lib.
-- Core: Rust lib from `utxo-core-vm`. C ABI is **not yet implemented** — the binary reads JSON from stdin. Plans for C ABI exist but are not shipped.
-- ZK: not required for v1. No Groth16 on the happy path. Mocks only under `#[cfg(test)]`.
+- Core: Rust lib from `utxo-core-vm`. C ABI is implemented (`src/ffi.rs` + `include/utxovm.h`); the crate builds `rlib` + `cdylib` + `staticlib`. The CLI binary also reads JSON from stdin.
+- ZK: not required for v1 and removed entirely — no Groth16, no `ark-*` deps, no `experimental-zk` feature. Do not reintroduce.
 
 Current execution entrypoint (Rust methods, not C ABI):
 
@@ -143,7 +142,7 @@ VmRuntime::deploy(wasm_bytes, caller, seal, satoshis, init_args) -> Result<Execu
 VmRuntime::execute(wasm_bytes, state, caller, method, args) -> Result<ExecutionResult, Error>
 ```
 
-A unified `verify()` C ABI entrypoint is **planned but not implemented**. Current callers: node scanner, CLI (JSON stdin/stdout), tests.
+The unified `verify()` entrypoint is implemented in `src/ffi.rs` (`utxovm_verify`) and exposed via the CLI `verify` command. It replays a JSON fixture (`{version:1, operations:[deploy|call…]}`) and returns a canonical `state_root` — two independent processes must agree on it. Current callers: node scanner, CLI (JSON stdin/stdout), C ABI consumers, tests.
 
 ## v1 product (only this)
 
@@ -180,27 +179,25 @@ Bonds: JKC locked in a documented vault template. No indexer token. Fees: option
 - `env.abort` handler (`runtime.rs`) returns `Err(...)` — traps the instance.
 - `max_memory_pages` enforced via `wasmtime::Config::static_memory_maximum_size()`.
 - Host fuel costs centralized in `runtime::fuel_costs` module.
-- `ark-*` ZK deps moved to optional `[dependencies]` behind `experimental-zk` feature.
+- ZK stack removed entirely: `zk.rs`, `ark-*` deps, `experimental-zk` feature, and `host_verify_groth16` deleted (ZK has no v1 use case — court model uses re-execution + watcher committee).
 - Code hash validation: `execute()` validates WASM hash against pinned `state.code_hash` before execution.
 
 **Remaining:**
-- Formalize WASM ISA spec in docs.
+- (none — WASM ISA spec formalized in `docs/WASM-ISA.md`)
 
 ## Forbidden in this phase
 
 - New coin / points / airdrop
 - Hub-and-spoke DOGE/LTC/BTC as required architecture
 - SPaaS, DHT rent, EIP-1559, “100k JKC APY” as code
-- `MOCK_PROOF` / `MOCK_VK` succeeding outside tests
-- `host_verify_groth16` on the settlement path
+- Reintroducing ZK proofs or `host_verify_groth16` on the settlement path (ZK stack deleted; court = re-execution + watchers)
 - Embedding VM in JKC consensus
 - Rewriting the VM in C++
 - Second execution engine
 - README claiming L2, “on-chain ZK slashing,” or “OP_CAT live” without code that spends a real script
 
-**Known violations (must be fixed):**
-- `runtime.rs` — `host_verify_groth16` is now feature-gated behind `experimental-zk` (fixed).
-- `zk.rs` — mock proofs are now behind `#[cfg(test)]` and the module is feature-gated (fixed).
+**Known violations (all fixed / deleted):**
+- `runtime.rs` — `host_verify_groth16` and the whole `zk.rs` module deleted; `experimental-zk` feature and `ark-*` deps removed (fixed by deletion).
 - `covenants.rs` — OP_CAT covenant code deleted entirely (Issue 14). `verify_equivocation_proof` moved to `attestation.rs`.
 
 ## Docs policy
@@ -228,7 +225,7 @@ If you touch scripts, add `docs/COURT.md` ≤ 40 lines: what L1 checks, what ope
 
 One concern per PR. Preferred order:
 
-1. `verify()` + C ABI + fixture replay (two processes, same root)
+1. ~~`verify()` + C ABI + fixture replay (two processes, same root)~~ ✅ Done — `src/ffi.rs` + `src/fixture.rs` + `include/utxovm.h`; `test_fixture_replay_two_processes` proves two CLI processes agree
 2. Fuel unify + abort trap
 3. Remove mock ZK from non-test
 4. Equivocation proof tests (known key, two messages)
@@ -241,16 +238,17 @@ Every PR: what can still lie, and whether that lie is slashable.
 ## Tests that must exist
 
 - Same WASM + witness → identical root twice
+- Same fixture → identical root across two separate processes (CLI `verify` command)
 - Fuel exhaustion reverts, no state write
 - Abort traps
 - Bad wasm hash rejected
 - Equivocation true/false cases
-- Mock proof rejected when `cfg(test)` is off (or feature `allow-mock-zk` off)
+- WASM fetch: local store hit, `WASM_MISSING` propagation for DHT fetch, `save_wasm` hash-mismatch rejection
 - Reorg: undo last object transition when JKC reorgs (if scanner exists)
 
 > **Full test documentation**: see `docs/TESTING.md` for every test file, how to run them, live testnet results, and production fixes discovered through live testing.
 >
-> **Live testnet status (2026-09-10)**: 10 transactions confirmed on JKC testnet, including the first real P2TR challenge slash tx. All 84 tests pass (60 offline + 24 live). BIP-342 compliance fixes applied to `l1_scripts.rs` (no CHECKMULTISIG in tapscript, x-only pubkeys, TapSighashType::All for script-path).
+> **Live testnet status (2026-09-10)**: 10 transactions confirmed on JKC testnet, including the first real P2TR challenge slash tx. All 134 tests pass (110 offline + 24 live). BIP-342 compliance fixes applied to `l1_scripts.rs` (no CHECKMULTISIG in tapscript, x-only pubkeys, TapSighashType::All for script-path).
 >
 > **Wallet for live tests**: `/home/sena/Documents/DedooProjects/PSOBProjects/jkc-testnet-wallet.md` (not committed — outside repo).
 

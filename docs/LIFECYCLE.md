@@ -52,14 +52,15 @@ const psbt = new bitcoin.Psbt({ network });
 ```
 
 ### Broadcast Transaction
-```bash
-node test-jkc-contracts.cjs
-```
+Use the SDK (`@utxo-vm/sdk`) or CLI (`@utxo-vm/cli`) to build and broadcast the
+deployment transaction. See `packages/sdk/src/contracts/` for per-contract
+client helpers (e.g. `sot_client.ts`, `native_vault_client.ts`).
 
 ### Verify Deployment
-```bash
-node replay-verifier.js <txid>
-```
+Replay-verify the deployment by re-executing the WASM against the on-chain
+state with `utxo-core-vm` (Rust) or the `utxo-vmd` scanner, and comparing the
+computed state root. Two independent replays of the same fixture must produce
+the same root (see `test_deterministic_replay_identical_root`).
 
 ## 3. Call
 
@@ -116,32 +117,33 @@ const fraudProof = {
 ```
 
 ### Submit Challenge Transaction
-```javascript
-const challengeScript = bitcoin.script.compile([
-  Buffer.from(challengerPubkey, 'hex'),
-  bitcoin.opcodes.OP_CHECKSIGVERIFY,
-  Buffer.from(fraudProofHash, 'hex'),
-  bitcoin.opcodes.OP_EQUALVERIFY,
-]);
+The challenge spends the operator's vault UTXO via the Taproot script path
+(Model B, committee-gated). The watcher committee co-signs with individual
+`OP_CHECKSIG` + `OP_CHECKSIGADD` (BIP-342; `OP_CHECKMULTISIG` is disabled in
+tapscript). Equivocation evidence is posted as an OP_RETURN output.
 
-const psbt = new bitcoin.Psbt({ network });
-// Add input with challenger funds
-// Add OP_RETURN with fraud proof
-// Add output to operator vault (to slash bond)
-// Add change output
-```
+See `packages/node/src/consensus/challenge.rs` (`build_challenge_transaction`)
+and `packages/node/src/consensus/l1_scripts.rs` (`build_challenge_leaf`) for
+the canonical builders. Live testnet validation: tx `76ee0e2f...` (2026-09-10)
+slashed a 100k-sat bond via this path.
 
 ### Verify Challenge
-```bash
-node replay-verifier.js <challenge-txid>
-```
+Re-execute the WASM against the on-chain state and confirm the two
+attestations in the equivocation proof are valid signatures by the same
+operator on divergent roots. See `packages/node/src/consensus/attestation.rs`
+(`verify_equivocation_proof`) and `packages/core-vm/tests/runtime_tests.rs`
+(`test_deterministic_replay_identical_root`).
 
 ## 5. Slash
 
 If the challenge is valid:
 1. Operator's bond is slashed
-2. Challenger receives portion of slashed bond
-3. Remaining funds go to protocol treasury
+2. Challenger claims the bond after the claim CSV delay
+3. Unclaimed remainder stays in the challenge UTXO until rebut or claim timeout
+
+There is no protocol treasury and no second coin — the bond is JKC, claimed by
+the challenger per the Model B challenge UTXO leaves
+(`build_challenge_claim_script_tree` in `l1_scripts.rs`).
 
 ## 6. Exit
 
@@ -157,37 +159,34 @@ If operator is unresponsive (silence):
 # Compile
 cd packages/contracts && npm run asbuild:release
 
-# Deploy
-node test-jkc-contracts.cjs
-
-# Verify
-node replay-verifier.js 6a697245861d25435ca42bec07ffaac581f6022494907dd86926889c598c7a13
+# Deploy (via @utxo-vm/sdk or @utxo-vm/cli — see packages/sdk/src/contracts/)
+# The SDK builds the OP_RETURN envelope + PSBT and broadcasts to JKC testnet.
 ```
 
 ### Step 2: Operator Posts Batch
 ```bash
 # Operator creates batch transaction
-# Posts state root to JKC testnet
+# Posts state root to JKC testnet (utxovm:batch envelope)
 ```
 
 ### Step 3: Challenger Verifies
 ```bash
-# Independent verifier checks state root
-node replay-verifier.js <batch-txid>
-
+# Independent verifier re-executes the WASM and compares the state root
+# (two independent replays must produce the same root — see runtime_tests.rs)
 # If fraud detected, submit challenge
 ```
 
 ### Step 4: Challenge Fraud
 ```bash
-# Create and broadcast challenge transaction
+# Build + broadcast challenge transaction via build_challenge_transaction()
+# Watcher committee co-signs (BIP-342 CHECKSIGADD, M-of-N)
 # Bond is slashed if fraud is proven
 ```
 
 ### Step 5: Claim Rewards
 ```bash
-# Challenger receives portion of slashed bond
-# Protocol maintains integrity
+# Challenger claims the slashed bond after the claim CSV delay
+# (see build_challenge_claim_script_tree in l1_scripts.rs)
 ```
 
 ## Key Concepts
@@ -246,4 +245,4 @@ Operators must bond JKC to participate:
 ### Economic Security
 - Bond amount must be > 10x TVL
 - Slash amount = 100% of bond for equivocation
-- Challenger reward = portion of slashed bond
+- Challenger claims the slashed bond after the claim CSV delay (Model B challenge UTXO)

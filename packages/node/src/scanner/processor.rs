@@ -106,7 +106,14 @@ impl BlockProcessor {
                 };
 
                 let metadata = envelope.metadata.unwrap_or_default();
-                let op = metadata.get("op").and_then(|v| v.as_str()).unwrap_or("call");
+                // application/wasm payloads ARE deploys — the WASM bytecode is
+                // the artifact being deployed. application/json envelopes use
+                // metadata.op to distinguish "create"/"deploy" from "call".
+                let op = if envelope.content_type == "application/wasm" {
+                    "deploy"
+                } else {
+                    metadata.get("op").and_then(|v| v.as_str()).unwrap_or("call")
+                };
 
                 if op == "create" || op == "deploy" {
                     // Fee validation for create/deploy
@@ -118,12 +125,33 @@ impl BlockProcessor {
                         return Ok(None);
                     }
 
+                    // If the envelope carries WASM bytecode directly, persist it
+                    // content-addressed so later calls can fetch it locally.
+                    // sha256(payload) is the canonical code_hash — a metadata
+                    // code_hash that disagrees is logged but the computed hash
+                    // wins (content-addressing).
+                    if envelope.content_type == "application/wasm" && !envelope.payload.is_empty() {
+                        use sha2::{Digest, Sha256};
+                        let computed = hex::encode(Sha256::digest(&envelope.payload));
+                        match self.store.save_wasm(&computed, &envelope.payload) {
+                            Ok(()) => info!("[Processor] Stored WASM blob ({} bytes) as {}", envelope.payload.len(), computed),
+                            Err(e) => warn!("[Processor] WASM store rejected: {}", e),
+                        }
+                    }
+
                     let obj_id = format!("obj_{}", &tx.txid[..16]);
                     let code_hash = metadata
                         .get("code_hash")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("wasm_default")
-                        .to_string();
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            if envelope.content_type == "application/wasm" {
+                                use sha2::{Digest, Sha256};
+                                hex::encode(Sha256::digest(&envelope.payload))
+                            } else {
+                                "wasm_default".to_string()
+                            }
+                        });
 
                     let initial_state = metadata.get("state").cloned().unwrap_or(serde_json::json!({
                         "initialized": true,
@@ -221,6 +249,12 @@ impl BlockProcessor {
                             let wasm_bytes = match self.get_wasm_bytes(&obj.code_hash) {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
+                                    // WASM_MISSING is propagated to the caller so the
+                                    // async scanner loop can fetch the blob from the
+                                    // P2P DHT, persist it, and retry this transaction.
+                                    if missing_wasm_hash(&e).is_some() {
+                                        return Err(e);
+                                    }
                                     warn!(
                                         "[Processor] Failed to fetch WASM for {}: {} — reverting, no state change",
                                         obj.object_id, e
@@ -351,20 +385,32 @@ impl BlockProcessor {
     }
 
     /// Retrieve WASM bytecode by code_hash.
-    /// In production, this fetches from Kademlia DHT or local cache.
-    /// Currently returns empty bytes for placeholder code_hash only.
+    /// Resolution order:
+    ///   1. Local WASM table (populated by deploy txs carrying application/wasm
+    ///      payloads, or by P2P DHT fetches the scanner loop performs).
+    ///   2. If absent locally, return a `WASM_MISSING:<code_hash>` error so the
+    ///      async caller can fetch it from the Kademlia DHT, save it via
+    ///      `store.save_wasm`, and retry the transaction.
     fn get_wasm_bytes(&self, code_hash: &str) -> Result<Vec<u8>> {
         if code_hash == "wasm_default" || code_hash.is_empty() {
             // Placeholder — no real WASM to execute
             Ok(Vec::new())
         } else {
-            // code_hash is a SHA-256 hash, NOT the WASM bytes themselves.
-            // We need to fetch the actual WASM from DHT or local cache.
-            // Until DHT integration is wired, return an error so the processor
-            // reverts (instead of silently executing garbage).
-            Err(anyhow!("WASM bytecode not found for code_hash={} — DHT fetch not yet implemented", code_hash))
+            match self.store.get_wasm(code_hash) {
+                Ok(Some(bytes)) => Ok(bytes),
+                Ok(None) => Err(anyhow!("WASM_MISSING:{}", code_hash)),
+                Err(e) => Err(anyhow!("WASM store read error for {}: {}", code_hash, e)),
+            }
         }
     }
+}
+
+/// Extract the code_hash from a `WASM_MISSING:<hash>` processor error,
+/// if that is what the error represents.
+pub fn missing_wasm_hash(err: &anyhow::Error) -> Option<String> {
+    err.to_string()
+        .strip_prefix("WASM_MISSING:")
+        .map(|s| s.trim().to_string())
 }
 
 #[derive(Debug)]

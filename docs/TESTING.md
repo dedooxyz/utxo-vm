@@ -15,9 +15,6 @@
 # Full workspace (all crates, all default tests)
 cargo test --workspace
 
-# With experimental-zk feature (mock ZK proofs, test-only)
-cargo test --workspace --features experimental-zk
-
 # Individual crates
 cargo test -p utxo-core-vm          # Core VM runtime
 cargo test -p utxo-vmd --lib        # Node library (consensus, scanner, storage, p2p)
@@ -65,17 +62,24 @@ cargo run -p utxo-vmd -- \
 
 | File | Tests | What It Covers |
 |:--|:--|:--|
-| `packages/core-vm/tests/runtime_tests.rs` | 12 | WASM execution, fuel metering, abort traps, code hash validation, deterministic replay, SIMD rejection, AssemblyScript contract execution |
+| `packages/core-vm/tests/runtime_tests.rs` | 22 | WASM execution, fuel metering, abort traps, code hash validation, deterministic replay, SIMD rejection, AssemblyScript contract execution, host_create_object, JSON parsing, missing-allocate ABI enforcement |
+| `packages/core-vm/tests/fixture_tests.rs` | 4 | Fixture replay: in-process identical root, two-process CLI replay (CARGO_BIN_EXE), root changes with ops, error paths |
 | `packages/node/src/consensus/challenge.rs` (inline) | 6 | Challenge tx construction: proof validation, watcher threshold, evidence output, tx serialization, bond/fee checks |
 | `packages/node/src/consensus/l1_scripts.rs` (inline) | 14 | Script builders: vault tree, challenge leaf (BIP-342), operator unbond leaf, silence escape, softfork status, tagged hashes, push encoding |
-| `packages/node/src/consensus/attestation.rs` (inline) | 4 | Attestation signing, verification, equivocation detection, fail-closed on no validators |
-| `packages/node/src/consensus/fee_distribution.rs` (inline) | 5 | Fee calculation, indexer fee, operator shares, challenged operator, summary |
+| `packages/node/src/consensus/attestation.rs` (inline) | 7 | Attestation signing, verification, equivocation detection, Merkle root, quorum result + divergence, fail-closed on no validators |
+| `packages/node/src/consensus/fee_distribution.rs` (inline) | 7 | Fee calculation, indexer fee, operator shares, challenged operator, summary, envelope creation |
+| `packages/node/src/consensus/operator_set.rs` (inline) | 6 | Operator registration, insufficient bond, unbond, slash, quorum, metrics |
+| `packages/node/src/scanner/parser.rs` (inline) | 2 | Envelope parsing, adversarial quadratic script linear scan |
+| `packages/node/src/storage/smt.rs` (inline) | 11 | Sparse Merkle Tree: insert, delete, proof, verify, deterministic root, caching, logarithmic scaling, sibling pairs |
+| `packages/node/src/cross_chain/bridge.rs` (inline) | 5 | Bridge: lock/mint, wrong-owner rejection, cancel/reclaim timeout, failed proof unlock, mint persistence |
+| `packages/node/src/cross_chain/relay.rs` (inline) | 1 | State relay flow |
+| `packages/node/src/cross_chain/verifier.rs` (inline) | 2 | Cross-chain proof: empty proof fails, Merkle leaf order independence |
 | `packages/node/tests/consensus_tests.rs` | 2 | End-to-end consensus: attestation + equivocation |
-| `packages/node/tests/processor_tests.rs` | 3 | Block processor: envelope parsing, state transitions, reorg handling |
+| `packages/node/tests/processor_tests.rs` | 9 | Block processor: envelope parsing, state transitions, reorg handling, multi-block rollback, WASM blob store/local fetch, WASM_MISSING propagation, save_wasm hash rejection |
 | `packages/node/tests/rpc_tests.rs` | 1 | RPC server: chain info endpoint |
 | `packages/node/tests/smt_tests.rs` | 2 | Sparse Merkle Tree: insert, proof, verify |
-| `packages/node/tests/storage_tests.rs` | 2 | Redb storage: put/get, rollback |
-| `packages/node/tests/p2p_tests.rs` | 1 | P2P node: identity, listen |
+| `packages/node/tests/storage_tests.rs` | 4 | Redb storage: put/get, rollback, block-keyed tables |
+| `packages/node/tests/p2p_tests.rs` | 3 | P2P node: identity, listen, multi-node |
 | `packages/node/tests/cross_chain_tests.rs` | 2 | Bridge: lock/mint, relay verify |
 
 ### Live Testnet Tests (all `#[ignore]` by default)
@@ -112,6 +116,16 @@ Tests in `packages/core-vm/tests/runtime_tests.rs`:
 | `test_abort_traps` | AssemblyScript `abort()` traps the instance |
 | `test_deterministic_replay_identical_root` | Two independent runs produce identical state root |
 | `test_compiled_assemblyscript_wasm_execution` | Compiled SOT contract deploys + transfers correctly |
+| `test_host_create_object_preserves_binary_state_and_large_size` | host_create_object preserves binary state, handles large sizes |
+| `test_host_create_object_exceeds_max_state_size_traps` | host_create_object traps when state exceeds max size |
+| `test_contract_json_parsing_escaped_quotes_and_whitespace` | Contract JSON parsing handles escaped quotes + whitespace |
+| `test_contract_json_parsing_malformed_returns_error_code` | Malformed JSON returns non-zero error code |
+| `test_missing_allocate_with_non_empty_init_args_deploy_fails` | Deploy with init_args but no `allocate` export → rejected |
+| `test_missing_allocate_with_non_empty_args_execute_fails` | Execute with args but no `allocate` export → rejected |
+| `test_missing_allocate_with_non_empty_state_execute_fails` | Execute with state but no `allocate` export → rejected |
+| `test_missing_allocate_with_get_state_fails` | Module with `get_state` but no `allocate` export → rejected |
+| `test_missing_allocate_with_no_call_export_succeeds` | Module without `call` and without args/state → succeeds (no allocate needed) |
+| `test_missing_allocate_with_call_export_and_empty_args_state_fails` | Module with `call` export but no `allocate` → rejected (method name write needs allocate) |
 
 ### 3.2 Consensus Tests
 
@@ -133,6 +147,10 @@ Tests in `packages/core-vm/tests/runtime_tests.rs`:
 | `test_sign_and_verify_attestation` | ECDSA sign + verify roundtrip |
 | `test_equivocation_detection_and_slashing_proof` | Double-sign detected, proof stored |
 | `test_fail_closed_no_validators_rejects_attestation` | No validators → attestation rejected |
+| `test_merkle_root_deterministic` | Attestation Merkle root is deterministic regardless of insertion order |
+| `test_build_quorum_result_and_divergence_detection` | Quorum result built from attestations; divergence detected against quorum root |
+| `test_build_quorum_result_no_quorum_returns_none` | Below-threshold attestations → no quorum result (None) |
+| `test_hash_attestation_payload_collision_resistance` | Attestation payload hash uses length-prefixed fields (domain-separated _V1), collision-resistant |
 
 **L1 Scripts** (`packages/node/src/consensus/l1_scripts.rs`):
 
@@ -193,7 +211,7 @@ All live tests connect to `https://jkc-testnet-api.s3na.xyz` (JKC testnet).
 - **Chain**: JKC Testnet
 - **Tip**: ~177,650
 - **Electrs**: `https://jkc-testnet-api.s3na.xyz`
-- **Softforks**: CSV active (h=120k), SegWit active (h=140k), Taproot active (h=160k), OP_CAT active, CLTV NOT active on testnet, MWEB not active
+- **Softforks**: CSV active (h=120k), SegWit active (h=140k), Taproot active (h=160k), OP_CAT active, CLTV NOT active on testnet, MWEB active (verified h=183,374 — HogEx txs present)
 
 ### Wallet
 - **Address**: `muZpTpBYhxmRFuCjLc7C6BBDF32C8XVJUi`
@@ -248,13 +266,13 @@ These fixes are in `packages/node/src/consensus/l1_scripts.rs` and are covered b
 
 | Category | Files | Tests | Status |
 |:--|:--|:--|:--|
-| Core VM | 1 | 12 | ✅ All pass |
-| Node lib (inline) | 6 modules | 36 | ✅ All pass |
-| Node integration | 6 files | 12 | ✅ All pass |
+| Core VM | 2 | 26 | ✅ All pass |
+| Node lib (inline) | 11 modules | 61 (1 ignored) | ✅ All pass |
+| Node integration | 7 files | 23 | ✅ All pass |
 | Live testnet (ignored) | 7 files | 24 | ✅ All pass |
-| **Total** | **20** | **84** | **0 failed** |
+| **Total** | **27** | **134** | **0 failed** |
 
-With `--features experimental-zk`: mock ZK tests (test-only).
+The `experimental-zk` feature and mock ZK tests were removed with the ZK stack.
 
 ---
 

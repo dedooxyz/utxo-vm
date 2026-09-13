@@ -15,6 +15,7 @@ const CHAIN_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("cha
 const UNDO_LOGS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("undo_logs");
 const BRIDGE_TRANSFERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bridge_transfers");
 const MINTED_PROOFS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("minted_proofs");
+const WASM_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wasm_blobs");
 
 /// Format a composite (chain, height) key for the blocks table.
 /// The height is zero-padded to 20 digits so lexicographic ordering matches
@@ -44,6 +45,7 @@ impl StateStore {
             let _ = write_txn.open_table(UNDO_LOGS_TABLE)?;
             let _ = write_txn.open_table(BRIDGE_TRANSFERS_TABLE)?;
             let _ = write_txn.open_table(MINTED_PROOFS_TABLE)?;
+            let _ = write_txn.open_table(WASM_TABLE)?;
         }
         write_txn.commit()?;
 
@@ -505,6 +507,42 @@ impl StateStore {
         let table = read_txn.open_table(MINTED_PROOFS_TABLE)?;
         if let Some(val) = table.get(object_id)? {
             Ok(Some(val.value().to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // ── WASM blob persistence (content-addressed by code_hash) ────────────
+
+    /// Store WASM bytecode keyed by its SHA-256 code_hash.
+    /// Returns Err if sha256(wasm_bytes) != code_hash — content-addressing
+    /// violations are rejected so a caller cannot poison the local store
+    /// by claiming a well-known hash maps to attacker-chosen bytes.
+    pub fn save_wasm(&self, code_hash: &str, wasm_bytes: &[u8]) -> Result<()> {
+        let computed = hex::encode(Sha256::digest(wasm_bytes));
+        if computed != code_hash {
+            return Err(anyhow::anyhow!(
+                "wasm hash mismatch: claimed={} but sha256(wasm)={}",
+                code_hash,
+                computed
+            ));
+        }
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(WASM_TABLE)?;
+            table.insert(code_hash, wasm_bytes)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Fetch WASM bytecode by code_hash from the local store.
+    /// Returns Ok(None) if not present — caller may then try the P2P DHT.
+    pub fn get_wasm(&self, code_hash: &str) -> Result<Option<Vec<u8>>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(WASM_TABLE)?;
+        if let Some(val) = table.get(code_hash)? {
+            Ok(Some(val.value().to_vec()))
         } else {
             Ok(None)
         }

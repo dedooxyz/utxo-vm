@@ -4,7 +4,8 @@
 //!   csv:     active=true,  height=120000
 //!   segwit:  active=true,  height=140000
 //!   taproot: active=true,  height=160000
-//!   mweb:    active=false, height=180000 (planned, optional)
+//!   mweb:    active=true,  height=180000 (verified 2026-09-13: block 183,374
+//!            contains a HogEx tx spending a witness-v8 (OP_8 <32B>) program)
 //!   bip65:   active=false on testnet (height=99999999), ACTIVE on mainnet
 //!   op_cat:  active=true on testnet (confirmed by developer)
 //!

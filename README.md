@@ -23,15 +23,18 @@
 - 3-of-3 validator quorum attestations posted on-chain
 - Scanner daemon (`utxo-vmd`) syncing live JKC testnet blocks
 - Live testnet operations: SOT mint, NFT mint, NativeVault, AtomicSwap, attestation posting
+- **C ABI (`utxovm_*` extern "C" functions)** — `cdylib`/`staticlib` for Core wallet integration
+- **Fixture replay verification** — two independent processes replay the same fixture → identical `state_root`
+- **Content-addressed WASM blobs** — deploy txs store bytecode; DHT fetch via Kademlia with hash verification
 
 **What does NOT work yet:**
-- C ABI for Core wallet integration
-- Second independent implementation
+- Second independent implementation (different codebase replaying fixtures)
 - On-chain divergence verification (Bitcoin Script cannot verify WASM execution — off-chain only)
+- MWEB peg-out settlement (host functions record intent; actual MW kernel settlement needs an MWEB-capable wallet)
 
 **Do not use in production.** This is a research prototype.
 
-> **Test results**: 84 tests pass (60 offline + 24 live testnet). See `docs/TESTING.md` for full test documentation, live tx IDs, and BIP-342 compliance fixes.
+> **Test results**: 134 tests pass (110 offline + 24 live testnet). See `docs/TESTING.md` for full test documentation, live tx IDs, and BIP-342 compliance fixes.
 
 ---
 
@@ -116,16 +119,16 @@ cargo test
 ## 🧪 Testing
 
 ```bash
-# Core VM tests (12 tests)
+# Core VM tests (26 tests: runtime + fixture replay)
 cargo test -p utxo-core-vm
 
-# Node library tests (51 tests: consensus, scanner, storage, p2p, rpc)
+# Node library tests (61 tests: consensus, scanner, storage, p2p, rpc, cross-chain)
 cargo test -p utxo-vmd --lib
 
-# Node integration tests (12 tests)
+# Node integration tests (23 tests)
 cargo test -p utxo-vmd --test consensus_tests --test processor_tests --test rpc_tests --test smt_tests --test storage_tests --test p2p_tests --test cross_chain_tests
 
-# Full workspace (all offline tests, 60 total)
+# Full workspace (all offline tests, 110 total)
 cargo test --workspace
 
 # Live testnet tests (24 tests, spend real tJKC — must pass --ignored)

@@ -383,3 +383,170 @@ fn test_execute_wasm_valid_json_state_succeeds() {
     let exec_result = result.unwrap();
     assert_eq!(exec_result.state_data, serde_json::json!({}));
 }
+
+/// Build a WASM deploy envelope script with content_type=application/wasm:
+/// OP_FALSE OP_IF <push "utxovm"> <push 0x01> <push "application/wasm"> <push wasm> OP_ENDIF
+fn build_wasm_deploy_script(wasm_bytes: &[u8]) -> Vec<u8> {
+    let mut script = vec![0x00, 0x63]; // OP_FALSE OP_IF
+    script.push(0x06);
+    script.extend_from_slice(b"utxovm");
+    script.push(0x01);
+    script.push(0x01); // version = 1
+    script.push(0x10); // content type len = 16? no — "application/wasm" is 16 bytes? "application/wasm" = 16 chars. yes.
+    script.extend_from_slice(b"application/wasm");
+    if wasm_bytes.len() < 0x4c {
+        script.push(wasm_bytes.len() as u8);
+    } else if wasm_bytes.len() <= 0xff {
+        script.push(0x4c);
+        script.push(wasm_bytes.len() as u8);
+    } else {
+        script.push(0x4d);
+        script.extend_from_slice(&(wasm_bytes.len() as u16).to_le_bytes());
+    }
+    script.extend_from_slice(wasm_bytes);
+    script.push(0x68); // OP_ENDIF
+    script
+}
+
+#[test]
+fn test_deploy_wasm_envelope_stores_blob_and_call_fetches_locally() {
+    // Deploy tx carries content_type=application/wasm → payload is stored
+    // content-addressed in the WASM table. A later call resolves the blob
+    // locally without any DHT round-trip.
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_wasm_store.redb");
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), 0, None);
+
+    // Minimal valid WASM: returns "{}" from get_state
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "init") (param i32 i32) (result i32) (i32.const 0))
+            (func (export "allocate") (param $size i32) (result i32) (i32.const 0x1000))
+            (func (export "get_state") (param $out_ptr i32) (result i32)
+                (i32.store8 (i32.const 0x1000) (i32.const 0x7b))
+                (i32.store8 (i32.const 0x1001) (i32.const 0x7d))
+                (i32.const 2)
+            )
+            (func (export "call") (param i32 i32 i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("WAT parse failed");
+    let code_hash = utxo_core_vm::VmRuntime::calculate_code_hash(&wasm_bytes);
+
+    let deploy_script = build_wasm_deploy_script(&wasm_bytes);
+    let tx_deploy = ElectrsTx {
+        txid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 50_000,
+            scriptpubkey: hex::encode(&deploy_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&deploy_script)),
+        }],
+    };
+
+    let obj_id = processor
+        .process_tx(&tx_deploy, 500)
+        .expect("deploy process failed")
+        .expect("expected object id");
+
+    // WASM blob must be stored under its sha256 code_hash
+    let stored = store.get_wasm(&code_hash).expect("get_wasm failed");
+    assert_eq!(stored.as_deref(), Some(wasm_bytes.as_slice()), "stored wasm must round-trip");
+
+    // Object's code_hash should default to the computed sha256 of the payload
+    let obj = store.get_object(&obj_id).unwrap().unwrap();
+    assert_eq!(obj.code_hash, code_hash);
+
+    // Call the object — get_wasm_bytes must resolve locally
+    let call_payload = br#"{"op":"call","method":"noop","args":{}}"#;
+    let call_script = build_envelope_script(call_payload);
+    let tx_call = ElectrsTx {
+        txid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 49_500,
+            scriptpubkey: hex::encode(&call_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&call_script)),
+        }],
+    };
+
+    let updated = processor
+        .process_tx(&tx_call, 501)
+        .expect("call process failed")
+        .expect("expected object updated");
+    assert_eq!(updated, obj_id);
+}
+
+#[test]
+fn test_missing_wasm_propagates_wasm_missing_error() {
+    // A call against an object whose code_hash is not in the local WASM
+    // table must surface a WASM_MISSING error (not Ok(None)) so the async
+    // scanner can DHT-fetch and retry.
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_wasm_missing.redb");
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+    let processor = BlockProcessor::new(store.clone(), "JKC_TESTNET".to_string(), 0, None);
+
+    // Seed an object directly with a code_hash that has no local blob.
+    let obj = SmartObjectRecord {
+        object_id: "obj_missing".to_string(),
+        code_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        seal: "9999999999999999999999999999999999999999999999999999999999999999:0".to_string(),
+        satoshis: 1000,
+        owner: "alice".to_string(),
+        state_data: serde_json::json!({"x": 1}),
+        created_at_block: 600,
+        updated_at_block: 600,
+    };
+    store.save_object(&obj).unwrap();
+
+    let call_payload = br#"{"op":"call","method":"noop","args":{}}"#;
+    let call_script = build_envelope_script(call_payload);
+    let tx_call = ElectrsTx {
+        txid: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+        vin: vec![ElectrsTxInput {
+            txid: "9999999999999999999999999999999999999999999999999999999999999999".to_string(),
+            vout: 0,
+        }],
+        vout: vec![ElectrsTxOutput {
+            value: 900,
+            scriptpubkey: hex::encode(&call_script),
+            scriptpubkey_asm: None,
+            scriptpubkey_hex: Some(hex::encode(&call_script)),
+        }],
+    };
+
+    let err = processor
+        .process_tx(&tx_call, 601)
+        .expect_err("must surface WASM_MISSING");
+    let hash = utxo_vmd::scanner::missing_wasm_hash(&err)
+        .expect("error must be WASM_MISSING");
+    assert_eq!(hash, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+}
+
+#[test]
+fn test_save_wasm_rejects_hash_mismatch() {
+    // Content-addressing enforcement: save_wasm must reject bytes whose
+    // sha256 does not equal the claimed code_hash.
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_wasm_hash.redb");
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+
+    let wasm = b"\x00asm\x01\x00\x00\x00";
+    let wrong_hash = "00".repeat(32);
+    assert!(store.save_wasm(&wrong_hash, wasm).is_err());
+
+    let right_hash = utxo_core_vm::VmRuntime::calculate_code_hash(wasm);
+    assert!(store.save_wasm(&right_hash, wasm).is_ok());
+    assert_eq!(store.get_wasm(&right_hash).unwrap().as_deref(), Some(wasm.as_slice()));
+}

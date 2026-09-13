@@ -1,9 +1,8 @@
+pub mod ffi;
+pub mod fixture;
 pub mod host_functions;
 pub mod runtime;
 pub mod state;
-
-#[cfg(feature = "experimental-zk")]
-pub mod zk;
 
 pub use host_functions::HostContext;
 pub use runtime::{ExecutionResult, VmConfig, VmRuntime};
