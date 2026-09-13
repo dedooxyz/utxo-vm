@@ -354,25 +354,21 @@ impl VmRuntime {
 
         let mut return_code = 0;
         if let Ok(init_fn) = instance.get_typed_func::<(i32, i32), i32>(&mut store, "init") {
-            // P2: Use allocate() instead of hardcoded offset
             let args_ptr = if !init_args.is_empty() {
-                if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut store, "allocate") {
-                    alloc_fn
-                        .call(&mut store, init_args.len() as i32)
-                        .map_err(|e| format!("allocate() error: {}", e))?
-                } else {
-                    // Fallback for modules without allocate — use low memory
-                    0x1000
-                }
+                let alloc_fn = instance
+                    .get_typed_func::<i32, i32>(&mut store, "allocate")
+                    .map_err(|_| "Module does not implement required ABI: missing 'allocate' export".to_string())?;
+                let ptr = alloc_fn
+                    .call(&mut store, init_args.len() as i32)
+                    .map_err(|e| format!("allocate() error: {}", e))?;
+                memory
+                    .write(&mut store, ptr as usize, init_args)
+                    .map_err(|e| format!("Memory write error: {}", e))?;
+                ptr
             } else {
-                0x1000 // init_args is empty, pointer doesn't matter
+                0
             };
 
-            if !init_args.is_empty() {
-                memory
-                    .write(&mut store, args_ptr as usize, init_args)
-                    .map_err(|e| format!("Memory write error: {}", e))?;
-            }
             return_code = init_fn
                 .call(&mut store, (args_ptr, init_args.len() as i32))
                 .map_err(|e| format!("Init execution error: {}", e))?;
@@ -389,22 +385,20 @@ impl VmRuntime {
 
         let mut state_data = Vec::new();
         if let Ok(get_state_fn) = instance.get_typed_func::<i32, i32>(&mut store, "get_state") {
-            // P2+P3: Query actual state size, allocate exact buffer, overflow check
             const MAX_STATE_SIZE: i32 = 1024 * 1024; // 1MB safety cap
             let buf_size = if let Ok(size_fn) = instance.get_typed_func::<(), i32>(&mut store, "get_state_size") {
-                let actual = size_fn.call(&mut store,()).unwrap_or(0);
+                let actual = size_fn.call(&mut store, ()).unwrap_or(0);
                 if actual > 0 { actual.min(MAX_STATE_SIZE) } else { Self::GET_STATE_BUF_SIZE as i32 }
             } else {
                 Self::GET_STATE_BUF_SIZE as i32
             };
 
-            let state_out_ptr = if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut store, "allocate") {
-                alloc_fn
-                    .call(&mut store, buf_size)
-                    .map_err(|e| format!("allocate() for get_state error: {}", e))?
-            } else {
-                0x2000
-            };
+            let alloc_fn = instance
+                .get_typed_func::<i32, i32>(&mut store, "allocate")
+                .map_err(|_| "Module does not implement required ABI: missing 'allocate' export".to_string())?;
+            let state_out_ptr = alloc_fn
+                .call(&mut store, buf_size)
+                .map_err(|e| format!("allocate() for get_state error: {}", e))?;
 
             let len = get_state_fn
                 .call(&mut store, state_out_ptr)
@@ -483,14 +477,26 @@ impl VmRuntime {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| "Module does not export 'memory'".to_string())?;
 
-        // Helper: allocate via guest, fallback to hardcoded offset.
-        // WASM only has i32/i64, so all pointers are i32.
-        let allocate_guest = |store: &mut Store<HostContext>, size: i32| -> i32 {
-            if let Ok(alloc_fn) = instance.get_typed_func::<i32, i32>(&mut *store, "allocate") {
-                alloc_fn.call(&mut *store, size).unwrap_or(0x1000)
-            } else {
-                0x1000
-            }
+        let has_alloc = instance.get_typed_func::<i32, i32>(&mut store, "allocate").is_ok();
+        let has_get_state = instance.get_typed_func::<i32, i32>(&mut store, "get_state").is_ok();
+
+        // If calldata or state is provided, allocate MUST be exported
+        if (!args.is_empty() || !state.state_data.is_empty()) && !has_alloc {
+            return Err("Module does not implement required ABI: missing 'allocate' export".to_string());
+        }
+
+        // If contract exports get_state, allocate MUST be exported to allocate the output buffer
+        if has_get_state && !has_alloc {
+            return Err("Module does not implement required ABI: missing 'allocate' export".to_string());
+        }
+
+        let allocate_guest = |store: &mut Store<HostContext>, size: i32| -> Result<i32, String> {
+            let alloc_fn = instance
+                .get_typed_func::<i32, i32>(&mut *store, "allocate")
+                .map_err(|_| "Module does not implement required ABI: missing 'allocate' export".to_string())?;
+            alloc_fn
+                .call(&mut *store, size)
+                .map_err(|e| format!("allocate() error: {}", e))
         };
 
         let deallocate_guest = |store: &mut Store<HostContext>, ptr: i32, size: i32| {
@@ -501,9 +507,9 @@ impl VmRuntime {
             }
         };
 
-        // P2: Restore state via allocate()
+        // Restore state via allocate()
         if !state.state_data.is_empty() {
-            let state_ptr = allocate_guest(&mut store, state.state_data.len() as i32);
+            let state_ptr = allocate_guest(&mut store, state.state_data.len() as i32)?;
             memory
                 .write(&mut store, state_ptr as usize, &state.state_data)
                 .map_err(|e| format!("Failed to write state to guest memory: {}", e))?;
@@ -517,23 +523,28 @@ impl VmRuntime {
             deallocate_guest(&mut store, state_ptr, state.state_data.len() as i32);
         }
 
-        // P2: Allocate for method name
-        let mut method_bytes = method.as_bytes().to_vec();
-        method_bytes.push(0); // null terminator
-        let method_ptr = allocate_guest(&mut store, method_bytes.len() as i32);
-        memory
-            .write(&mut store, method_ptr as usize, &method_bytes)
-            .map_err(|e| format!("Failed to write method to guest memory: {}", e))?;
+        // Allocate for method name if allocator is present, or skip if both args & state are empty and no allocator
+        let (method_ptr, method_len) = if has_alloc {
+            let mut method_bytes = method.as_bytes().to_vec();
+            method_bytes.push(0); // null terminator
+            let ptr = allocate_guest(&mut store, method_bytes.len() as i32)?;
+            memory
+                .write(&mut store, ptr as usize, &method_bytes)
+                .map_err(|e| format!("Failed to write method to guest memory: {}", e))?;
+            (ptr, method_bytes.len() as i32)
+        } else {
+            (0, 0)
+        };
 
-        // P2: Allocate for args
+        // Allocate for args
         let args_ptr = if !args.is_empty() {
-            let ptr = allocate_guest(&mut store, args.len() as i32);
+            let ptr = allocate_guest(&mut store, args.len() as i32)?;
             memory
                 .write(&mut store, ptr as usize, args)
                 .map_err(|e| format!("Failed to write args to guest memory: {}", e))?;
             ptr
         } else {
-            0x1000 // dummy pointer for empty args
+            0
         };
 
         let mut return_code = 0;
@@ -547,23 +558,25 @@ impl VmRuntime {
         }
 
         // Deallocate method and args
-        deallocate_guest(&mut store, method_ptr, method_bytes.len() as i32);
+        if method_ptr != 0 {
+            deallocate_guest(&mut store, method_ptr, method_len);
+        }
         if !args.is_empty() {
             deallocate_guest(&mut store, args_ptr, args.len() as i32);
         }
 
-        // P2+P3: Read state via allocated buffer with overflow protection
+        // Read state via allocated buffer with overflow protection
         let mut updated_state_data = state.state_data.clone();
         if let Ok(get_state_fn) = instance.get_typed_func::<i32, i32>(&mut store, "get_state") {
             const MAX_STATE_SIZE: i32 = 1024 * 1024; // 1MB safety cap
             let buf_size = if let Ok(size_fn) = instance.get_typed_func::<(), i32>(&mut store, "get_state_size") {
-                let actual = size_fn.call(&mut store,()).unwrap_or(0);
+                let actual = size_fn.call(&mut store, ()).unwrap_or(0);
                 if actual > 0 { actual.min(MAX_STATE_SIZE) } else { Self::GET_STATE_BUF_SIZE as i32 }
             } else {
                 Self::GET_STATE_BUF_SIZE as i32
             };
 
-            let state_out_ptr = allocate_guest(&mut store, buf_size);
+            let state_out_ptr = allocate_guest(&mut store, buf_size)?;
             let len = get_state_fn
                 .call(&mut store, state_out_ptr)
                 .unwrap_or(0);

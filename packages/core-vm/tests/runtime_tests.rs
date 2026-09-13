@@ -32,6 +32,10 @@ fn test_wat_host_functions_execution() {
                 (i32.const 0)
             )
 
+            (func (export "allocate") (param $size i32) (result i32)
+                (i32.const 0x1000)
+            )
+
             (func (export "call") (param $method_ptr i32) (param $args_ptr i32) (param $args_len i32) (result i32)
                 (call $host_emit_event (i32.const 0x0100) (i32.const 0x0200) (i32.const 22))
                 (drop (call $host_stealth_settle (i32.const 0x0300) (i64.const 50000)))
@@ -190,6 +194,10 @@ fn test_deterministic_replay_identical_root() {
                 (i32.const 0)
             )
 
+            (func (export "allocate") (param $size i32) (result i32)
+                (i32.const 0x1000)
+            )
+
             (func (export "call") (param $method_ptr i32) (param $args_ptr i32) (param $args_len i32) (result i32)
                 ;; Increment counter
                 (global.set $counter (i32.add (global.get $counter) (i32.const 1)))
@@ -254,6 +262,10 @@ fn test_abort_traps() {
             (memory (export "memory") 1)
 
             (data (i32.const 0x0100) "intentional abort")
+
+            (func (export "allocate") (param $size i32) (result i32)
+                (i32.const 0x1000)
+            )
 
             (func (export "call") (param $method_ptr i32) (param $args_ptr i32) (param $args_len i32) (result i32)
                 ;; Call abort with msg pointer, file pointer, line, col
@@ -527,6 +539,10 @@ fn test_host_create_object_preserves_binary_state_and_large_size() {
                 (i32.const 0)
             )
 
+            (func (export "allocate") (param $size i32) (result i32)
+                (i32.const 0x3000)
+            )
+
             (func (export "get_state") (param $out_ptr i32) (result i32)
                 (i32.const 0)
             )
@@ -584,6 +600,10 @@ fn test_host_create_object_exceeds_max_state_size_traps() {
                 ;; Request length 2MB which exceeds 1MB MAX_STATE_SIZE
                 (drop (call $host_create_object (i32.const 0x0100) (i32.const 0x0200) (i32.const 2097152) (i64.const 1000)))
                 (i32.const 0)
+            )
+
+            (func (export "allocate") (param $size i32) (result i32)
+                (i32.const 0x3000)
             )
 
             (func (export "get_state") (param $out_ptr i32) (result i32)
@@ -747,3 +767,151 @@ fn test_contract_json_parsing_malformed_returns_error_code() {
         .expect("Execution failed");
     assert_ne!(bad_call2.return_code, 0, "Non-JSON args must return non-zero error code");
 }
+
+#[test]
+fn test_missing_allocate_with_non_empty_init_args_deploy_fails() {
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "init") (param i32 i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+    let seal = SingleUseSeal {
+        txid: "0011223344".to_string(),
+        vout: 0,
+    };
+    let res = runtime.deploy(&wasm_bytes, "deployer".to_string(), seal, 1000, b"init_data");
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("missing 'allocate' export"),
+        "Deploy with non-empty init_args must fail if allocate is missing, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_missing_allocate_with_non_empty_args_execute_fails() {
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "call") (param i32 i32 i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+    let state = SmartObjectState {
+        object_id: "obj_no_alloc".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "0011223344".to_string(),
+            vout: 0,
+        },
+        satoshis: 1000,
+        owner_pubkey: "alice".to_string(),
+        state_data: vec![],
+    };
+    let res = runtime.execute(&wasm_bytes, &state, "alice".to_string(), "foo", b"calldata");
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("missing 'allocate' export"),
+        "Execute with non-empty args must fail if allocate is missing, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_missing_allocate_with_non_empty_state_execute_fails() {
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "call") (param i32 i32 i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+    let state = SmartObjectState {
+        object_id: "obj_no_alloc_state".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "0011223344".to_string(),
+            vout: 0,
+        },
+        satoshis: 1000,
+        owner_pubkey: "alice".to_string(),
+        state_data: b"some_state".to_vec(),
+    };
+    let res = runtime.execute(&wasm_bytes, &state, "alice".to_string(), "foo", b"");
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("missing 'allocate' export"),
+        "Execute with non-empty state must fail if allocate is missing, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_missing_allocate_with_get_state_fails() {
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "call") (param i32 i32 i32) (result i32) (i32.const 0))
+            (func (export "get_state") (param i32) (result i32) (i32.const 0))
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+    let state = SmartObjectState {
+        object_id: "obj_get_state_no_alloc".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "0011223344".to_string(),
+            vout: 0,
+        },
+        satoshis: 1000,
+        owner_pubkey: "alice".to_string(),
+        state_data: vec![],
+    };
+    let res = runtime.execute(&wasm_bytes, &state, "alice".to_string(), "foo", b"");
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("missing 'allocate' export"),
+        "Execute with get_state must fail if allocate is missing, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_missing_allocate_with_empty_args_and_state_succeeds() {
+    let wat = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "call") (param i32 i32 i32) (result i32)
+                (i32.const 42)
+            )
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat).expect("Failed to parse WAT");
+    let runtime = VmRuntime::new(VmConfig::default());
+    let state = SmartObjectState {
+        object_id: "obj_empty_fast_path".to_string(),
+        code_hash: VmRuntime::calculate_code_hash(&wasm_bytes),
+        seal: SingleUseSeal {
+            txid: "0011223344".to_string(),
+            vout: 0,
+        },
+        satoshis: 1000,
+        owner_pubkey: "alice".to_string(),
+        state_data: vec![],
+    };
+    let res = runtime.execute(&wasm_bytes, &state, "alice".to_string(), "foo", b"");
+    assert!(res.is_ok());
+    let exec = res.unwrap();
+    assert_eq!(exec.return_code, 42);
+}
+

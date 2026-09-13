@@ -158,7 +158,7 @@ Optional (recommended for stateful contracts):
 export function restore_state(state_ptr: usize, state_len: i32): i32;
 ```
 
-Modules that do not export `allocate` fall back to hardcoded offsets (`0x0500` for method, `0x1000` for args, `0x2000` for state output, `0x3000` for state restore) for backward compatibility. New contracts should always export `allocate`.
+Contracts that accept calldata (`init_args` or `call` args), receive prior state, or export `get_state` must export `allocate(size: i32) -> i32`. Modules omitting `allocate` when calldata/state is provided are rejected with an explicit ABI error (`Module does not implement required ABI: missing 'allocate' export`). If both args and state are empty, guest memory writing is skipped entirely and execution may proceed with null pointers (`0`). Hardcoded memory offset fallbacks are strictly prohibited.
 
 ### 7.2 Function Signatures
 
