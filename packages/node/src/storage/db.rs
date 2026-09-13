@@ -10,11 +10,18 @@ use crate::types::{BlockRecord, SmartObjectRecord, SmtInclusionProof, StateTrans
 const OBJECTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("objects");
 const SEALS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("seals");
 const TRANSITIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("transitions");
-const BLOCKS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
+const BLOCKS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("blocks");
 const CHAIN_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("chain_meta");
 const UNDO_LOGS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("undo_logs");
 const BRIDGE_TRANSFERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bridge_transfers");
 const MINTED_PROOFS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("minted_proofs");
+
+/// Format a composite (chain, height) key for the blocks table.
+/// The height is zero-padded to 20 digits so lexicographic ordering matches
+/// numeric ordering within a chain prefix.
+fn block_key(chain: &str, height: u64) -> String {
+    format!("{}:{:020}", chain, height)
+}
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -186,19 +193,21 @@ impl StateStore {
 
     pub fn save_block(&self, block: &BlockRecord) -> Result<()> {
         let serialized = serde_json::to_vec(block)?;
+        let key = block_key(&block.chain, block.block_height);
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(BLOCKS_TABLE)?;
-            table.insert(block.block_height, serialized.as_slice())?;
+            table.insert(key.as_str(), serialized.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
     }
 
-    pub fn get_block(&self, height: u64) -> Result<Option<BlockRecord>> {
+    pub fn get_block(&self, chain: &str, height: u64) -> Result<Option<BlockRecord>> {
+        let key = block_key(chain, height);
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(BLOCKS_TABLE)?;
-        if let Some(val) = table.get(height)? {
+        if let Some(val) = table.get(key.as_str())? {
             let block: BlockRecord = serde_json::from_slice(val.value())?;
             Ok(Some(block))
         } else {
@@ -339,16 +348,26 @@ impl StateStore {
                 undo_table.remove(id)?;
             }
 
-            // Delete stale block records (all blocks above target_height)
-            let mut stale_block_heights = Vec::new();
+            // Delete stale block records for THIS chain only (all blocks
+            // above target_height). The blocks table is keyed by (chain, height),
+            // so we filter by chain prefix to avoid deleting blocks from
+            // other chains that happen to be at the same height.
+            let chain_prefix = format!("{}:", chain);
+            let mut stale_block_keys = Vec::new();
             for item in blocks_table.iter()? {
-                let (h_acc, _) = item?;
-                if h_acc.value() > target_height {
-                    stale_block_heights.push(h_acc.value());
+                let (key_acc, val_acc) = item?;
+                let key_str = key_acc.value();
+                if !key_str.starts_with(&chain_prefix) {
+                    continue;
+                }
+                if let Ok(rec) = serde_json::from_slice::<BlockRecord>(val_acc.value()) {
+                    if rec.block_height > target_height {
+                        stale_block_keys.push(key_str.to_string());
+                    }
                 }
             }
-            for h in stale_block_heights {
-                let _ = blocks_table.remove(h);
+            for key in stale_block_keys {
+                let _ = blocks_table.remove(key.as_str());
             }
 
             // Delete stale transition records — scan and remove by block_height

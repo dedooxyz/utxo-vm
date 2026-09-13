@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
 
                     // Reorg detection: verify local block hash at last_synced matches L1
                     if last_synced > 0 {
-                        if let Ok(Some(local_block)) = store_sync.get_block(last_synced) {
+                        if let Ok(Some(local_block)) = store_sync.get_block(&chain_sync, last_synced) {
                             if let Ok(l1_hash) = electrs_sync.get_block_hash(last_synced).await {
                                 if l1_hash != local_block.block_hash {
                                     warn!(
@@ -280,7 +280,7 @@ async fn main() -> Result<()> {
                                     let mut ancestor = last_synced.saturating_sub(1);
                                     let mut found_ancestor = false;
                                     while ancestor > 0 {
-                                        if let Ok(Some(prev_local)) = store_sync.get_block(ancestor) {
+                                        if let Ok(Some(prev_local)) = store_sync.get_block(&chain_sync, ancestor) {
                                             match electrs_sync.get_block_hash(ancestor).await {
                                                 Ok(prev_l1_hash) => {
                                                     if prev_l1_hash == prev_local.block_hash {

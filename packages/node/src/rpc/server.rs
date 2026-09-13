@@ -376,7 +376,7 @@ async fn get_state_root_at_height(
 
     let block = state
         .store
-        .get_block(height)
+        .get_block(&state.chain, height)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let attestations = state.consensus.get_attestations(&state.chain, height);

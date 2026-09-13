@@ -62,7 +62,7 @@ impl StateRelay {
         // Get block from store
         let block = self
             .store
-            .get_block(block_height)
+            .get_block(source_chain, block_height)
             .context("Failed to get block")?
             .ok_or_else(|| anyhow::anyhow!("Block not found at height {}", block_height))?;
 

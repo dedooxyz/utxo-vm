@@ -113,8 +113,8 @@ fn test_storage_reorg_rollback() {
     assert_eq!(restored.seal, "tx_first:0");
 
     // Block 10 must still exist; block 12 (no undo log) must be cleaned up
-    assert!(store.get_block(10).unwrap().is_some());
-    assert!(store.get_block(12).unwrap().is_none());
+    assert!(store.get_block("JKC", 10).unwrap().is_some());
+    assert!(store.get_block("JKC", 12).unwrap().is_none());
 }
 
 #[test]
@@ -234,10 +234,10 @@ fn test_multi_block_reorg_rollback() {
     assert_eq!(restored.state_data, serde_json::json!({ "balance": 100 }));
 
     // Blocks 11, 12, 13 must all be cleaned up (including 12 which had no undo log)
-    assert!(store.get_block(10).unwrap().is_some(), "Block 10 must survive");
-    assert!(store.get_block(11).unwrap().is_none(), "Block 11 must be cleaned up");
-    assert!(store.get_block(12).unwrap().is_none(), "Block 12 (no undo log) must be cleaned up");
-    assert!(store.get_block(13).unwrap().is_none(), "Block 13 must be cleaned up");
+    assert!(store.get_block("JKC", 10).unwrap().is_some(), "Block 10 must survive");
+    assert!(store.get_block("JKC", 11).unwrap().is_none(), "Block 11 must be cleaned up");
+    assert!(store.get_block("JKC", 12).unwrap().is_none(), "Block 12 (no undo log) must be cleaned up");
+    assert!(store.get_block("JKC", 13).unwrap().is_none(), "Block 13 must be cleaned up");
 
     // Last sync block must be reset to 10
     assert_eq!(store.get_last_sync_block("JKC").unwrap(), 10);
@@ -265,4 +265,64 @@ fn test_multi_block_reorg_rollback() {
         store_ref.current_state_root(),
         "SMT root after multi-block rollback must match a fresh tree with the same state"
     );
+}
+
+#[test]
+fn test_multi_chain_block_isolation() {
+    // Pre-existing issue fix: BLOCKS_TABLE was keyed by height only, not
+    // (chain, height). Two chains at the same height would collide, and
+    // rolling back one chain would delete the other chain's blocks.
+    // Now the table is keyed by "{chain}:{height:020}" so chains are isolated.
+    let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = temp_dir.path().join("test_multi_chain.redb");
+    let store = StateStore::open(&db_path).expect("StateStore open failed");
+
+    // Save blocks at height 10 for two different chains
+    store.save_block(&BlockRecord {
+        chain: "JKC".to_string(),
+        block_height: 10,
+        block_hash: "jkc_hash_10".to_string(),
+        prev_hash: None,
+        state_root: "jkc_root_10".to_string(),
+        timestamp: 1000,
+    }).unwrap();
+    store.save_block(&BlockRecord {
+        chain: "BTC".to_string(),
+        block_height: 10,
+        block_hash: "btc_hash_10".to_string(),
+        prev_hash: None,
+        state_root: "btc_root_10".to_string(),
+        timestamp: 1000,
+    }).unwrap();
+
+    // Both chains should have their block at height 10
+    let jkc_block = store.get_block("JKC", 10).unwrap().expect("JKC block 10 must exist");
+    assert_eq!(jkc_block.block_hash, "jkc_hash_10");
+    let btc_block = store.get_block("BTC", 10).unwrap().expect("BTC block 10 must exist");
+    assert_eq!(btc_block.block_hash, "btc_hash_10");
+
+    // Save a block at height 11 for JKC only
+    store.save_block(&BlockRecord {
+        chain: "JKC".to_string(),
+        block_height: 11,
+        block_hash: "jkc_hash_11".to_string(),
+        prev_hash: Some("jkc_hash_10".to_string()),
+        state_root: "jkc_root_11".to_string(),
+        timestamp: 1100,
+    }).unwrap();
+
+    // Roll back JKC to height 10 — must NOT affect BTC's block at height 10
+    let rolled = store.rollback_to_block("JKC", 10).unwrap();
+    assert_eq!(rolled, 0, "No undo logs to roll back");
+
+    // JKC block 11 must be cleaned up
+    assert!(store.get_block("JKC", 11).unwrap().is_none(), "JKC block 11 must be cleaned up");
+
+    // JKC block 10 must survive
+    assert!(store.get_block("JKC", 10).unwrap().is_some(), "JKC block 10 must survive");
+
+    // BTC block 10 must NOT be affected by JKC rollback
+    let btc_block_after = store.get_block("BTC", 10).unwrap()
+        .expect("BTC block 10 must survive JKC rollback");
+    assert_eq!(btc_block_after.block_hash, "btc_hash_10", "BTC block 10 must be untouched");
 }
