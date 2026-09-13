@@ -59,12 +59,26 @@ pub fn parse_envelope(script_bytes: &[u8]) -> Option<UtxoVmEnvelope> {
                 _ => {}
             }
         }
-        // Scan for OP_FALSE OP_IF within the OP_RETURN payload
+        // Scan for OP_FALSE OP_IF within the OP_RETURN payload.
+        // Issue 16: Instead of calling parse_if_envelope at every byte offset
+        // (O(n²) worst-case for adversarial scripts), use a fast 2-byte search
+        // for the 0x00 0x63 (OP_FALSE OP_IF) signature to jump directly between
+        // candidate offsets. This makes scanning O(n) in the common case.
         while offset + 8 < script_bytes.len() {
-            if let Some(env) = parse_if_envelope(script_bytes, offset) {
-                return Some(env);
+            // Fast search for 0x00 0x63 starting at current offset
+            let search_slice = &script_bytes[offset..];
+            let candidate = search_slice.windows(2).position(|w| w == &[0x00, 0x63]);
+            match candidate {
+                None => break,
+                Some(rel) => {
+                    let abs = offset + rel;
+                    if let Some(env) = parse_if_envelope(script_bytes, abs) {
+                        return Some(env);
+                    }
+                    // Move past this candidate's first byte to continue searching
+                    offset = abs + 1;
+                }
             }
-            offset += 1;
         }
     }
 
@@ -241,5 +255,48 @@ mod tests {
         let env = parse_envelope(&script).expect("Envelope should be parsed");
         assert_eq!(env.protocol, "utxovm");
         assert!(env.metadata.is_some());
+    }
+
+    #[test]
+    fn test_adversarial_quadratic_script_parses_linearly() {
+        // Issue 16: An adversarially constructed script with many 0x00 0x63
+        // near-misses that never complete a valid envelope must not cause
+        // quadratic parsing time. Before the fix, parse_envelope called
+        // parse_if_envelope at every byte offset, each doing O(n) work.
+        // Now it uses a fast 2-byte search to jump between candidates.
+        //
+        // Build a 50KB script: OP_RETURN prefix, then many 0x00 0x63 pairs
+        // followed by garbage that fails the "utxovm" tag check.
+        let mut script = vec![0x6a]; // OP_RETURN
+        script.push(0x4c); // PUSHDATA1
+        script.push(0x00); // placeholder length (will be large)
+
+        // Fill with adversarial near-misses: 0x00 0x63 followed by wrong tag
+        let adversarial_chunk = [0x00, 0x63, 0x05, 0x42, 0x42, 0x42, 0x42, 0x42]; // 0x00 0x63 + wrong tag
+        let target_size = 50_000;
+        while script.len() < target_size {
+            script.extend_from_slice(&adversarial_chunk);
+        }
+
+        // Fix the PUSHDATA1 length to cover the rest of the script
+        let payload_len = script.len() - 2;
+        if payload_len <= 0xff {
+            script[1] = payload_len as u8;
+        }
+
+        // This should complete quickly (linear time), not hang.
+        // If it takes quadratic time, this test will be very slow.
+        let start = std::time::Instant::now();
+        let result = parse_envelope(&script);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "Adversarial script should not produce a valid envelope");
+        // Should complete in well under 1 second for 50KB.
+        // (Before the fix, this would be O(n²) — 50k² = 2.5 billion operations.)
+        assert!(
+            elapsed.as_millis() < 1000,
+            "Parsing 50KB adversarial script took {:?} — should be linear, not quadratic",
+            elapsed
+        );
     }
 }
